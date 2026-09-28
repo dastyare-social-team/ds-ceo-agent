@@ -20,7 +20,7 @@
  *
  *   - JavaScript source files. Only the .map and .d.ts sidecars go.
  */
-import { existsSync, readFileSync, readdirSync, rmSync, statSync } from 'node:fs';
+import { cpSync, existsSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 const funcDir = process.argv[2] ?? '.vercel/output/functions/index.func';
@@ -83,6 +83,72 @@ const nodeModules = join(funcDir, 'node_modules');
 const maps = pruneFiles(nodeModules, (name) => name.endsWith('.map'));
 // Type declarations. Only read by a TypeScript compiler, which is not shipped.
 const types = pruneFiles(nodeModules, (name) => name.endsWith('.d.ts') || name.endsWith('.d.mts'));
+
+/**
+ * The Mastra Vercel deployer writes its own dependency list into the output
+ * package.json, and that list does not include everything the app imports.
+ * Anything missing is installed by neither the build nor Vercel, so it fails at
+ * runtime with a bare "Cannot find module" — which is how voice broke on Vercel
+ * with `Cannot find module 'unbzip2-stream'`. Declare those packages here so
+ * they are installed, and copy the tree across for the local check.
+ */
+// The Linux binary is declared explicitly, not left to optionalDependencies.
+// The wrapper loads it by platform name, and an optional dep is only installed
+// if npm believes the platform matches; naming it removes that guesswork and
+// documents the 31MB the deploy is paying for. The other platforms stay optional
+// so local development on macOS or Windows still works.
+const TARGET_PLATFORM_PACKAGE = 'sherpa-onnx-linux-x64';
+const VOICE_PACKAGES = [
+  'sherpa-onnx-node',
+  'tar-stream',
+  'unbzip2-stream',
+  'ogg-opus-decoder',
+  TARGET_PLATFORM_PACKAGE,
+];
+const outputPkgPath = join(funcDir, 'package.json');
+
+if (existsSync(outputPkgPath)) {
+  const pkg = JSON.parse(readFileSync(outputPkgPath, 'utf8'));
+  pkg.dependencies = { ...(pkg.dependencies ?? {}) };
+
+  // The target binary is installed on the deploy host, not here: npm refuses to
+  // install a linux package on an arm64 mac, and the local tree only has the
+  // darwin one. Its version is pinned rather than read, so this works on both.
+  const PINNED = { [TARGET_PLATFORM_PACKAGE]: '1.13.8' };
+  const toDeclare = VOICE_PACKAGES.filter(
+    (name) => existsSync(join('node_modules', name, 'package.json')),
+  );
+  const unavailable = VOICE_PACKAGES.filter((name) => !toDeclare.includes(name));
+  if (unavailable.some((n) => !(n in PINNED))) {
+    console.error(`  Not installed and not pinned: ${unavailable.join(', ')}`);
+    process.exit(1);
+  }
+
+  const added = [];
+  for (const name of VOICE_PACKAGES) {
+    if (pkg.dependencies[name]) continue;
+    const version = PINNED[name] ?? JSON.parse(
+      readFileSync(join('node_modules', name, 'package.json'), 'utf8'),
+    ).version;
+    pkg.dependencies[name] = `^${version}`;
+    added.push(`${name}@${version}`);
+  }
+  if (unavailable.length) {
+    console.log(`  pinned  : ${unavailable.join(', ')} (installed on the deploy host)`);
+  }
+
+  writeFileSync(outputPkgPath, `${JSON.stringify(pkg, null, 2)}\n`);
+  console.log(`  declared : ${added.length ? added.join(', ') : '(all already declared)'}`);
+
+  // The build does not copy these across, so do it here. This also lets the
+  // bundle be booted and exercised locally instead of only on Vercel.
+  for (const name of toDeclare) {
+    const target = join(funcDir, 'node_modules', name);
+    if (existsSync(target)) continue;
+    cpSync(join('node_modules', name), target, { recursive: true, dereference: true });
+    console.log(`  copied   : ${name}`);
+  }
+}
 
 const after = dirSize(funcDir);
 console.log(`  before    : ${mb(before)} MB`);

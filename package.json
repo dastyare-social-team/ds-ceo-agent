@@ -1,0 +1,37 @@
+{
+  "name": "dastyare-social-ceo-agent",
+  "version": "0.1.0",
+  "description": "Dastyare Social — CEO Agent: a private Mastra agent on Telegram, deployed to Vercel with Postgres-backed memory.",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "mastra dev",
+    "build": "mastra build",
+    "start": "mastra start",
+    "typecheck": "tsc --noEmit",
+    "webhook": "node scripts/set-webhook.mjs",
+    "webhook:remove": "node scripts/set-webhook.mjs --remove",
+    "test": "node --env-file=.env --test test/*.test.ts"
+  },
+  "dependencies": {
+    "@chat-adapter/telegram": "latest",
+    "@mastra/core": "latest",
+    "@mastra/deployer-vercel": "latest",
+    "@mastra/libsql": "latest",
+    "@mastra/memory": "latest",
+    "@mastra/pg": "^1.27.1",
+    "@mastra/redis-streams": "latest",
+    "@mastra/tavily": "latest",
+    "@tavily/core": "latest",
+    "@vercel/functions": "latest",
+    "zod": "latest"
+  },
+  "devDependencies": {
+    "@types/node": "latest",
+    "mastra": "latest",
+    "typescript": "latest"
+  },
+  "engines": {
+    "node": ">=22.18.0"
+  }
+}

@@ -268,3 +268,68 @@ test('/recall rejects a session number that does not exist', async () => {
     await cleanup(resource);
   }
 });
+
+/**
+ * Regression: the channel `Message` carries text on a top-level `text` field and
+ * has no `content.parts`. Reading the stored-message shape instead made every
+ * command return '' and fall through to the model, so /new and /history silently
+ * did nothing. This drives the real guard with a realistic Message.
+ */
+test('the guard reads command text off the real channel Message shape', async () => {
+  const { createGuardedHandler } = await import('../src/mastra/guard.ts');
+  const resource = scratchResource();
+  try {
+    await seed(resource, 't-guard', ['context to archive'], { externalId: resource });
+
+    const posted: string[] = [];
+    const thread = {
+      id: resource, // what memoryResourceId() reads
+      post: async (m: unknown) => { posted.push(String(m)); },
+    };
+    // A real channel Message: top-level text, no content.parts.
+    const message = {
+      id: 'msg-1',
+      text: '/new',
+      author: { userId: '8440954997' },
+      attachments: [],
+    };
+
+    let defaultHandlerRan = false;
+    await createGuardedHandler('dm')(
+      thread as never,
+      message as never,
+      async () => { defaultHandlerRan = true; },
+      {} as never,
+    );
+
+    assert.equal(defaultHandlerRan, false, 'a command must not reach the model');
+    assert.equal(posted.length, 1, 'the command must be answered directly');
+    assert.match(posted[0], /Started a new chat/);
+
+    const memory = (await storage.getStore('memory'))!;
+    const { threads } = await memory.listThreads({ filter: { resourceId: resource }, perPage: 5 });
+    assert.equal(threads.length, 0, 'the live thread should be cleared');
+    const archived = await memory.listThreads({
+      filter: { resourceId: `${resource}:archive` },
+      perPage: 5,
+    });
+    assert.equal(archived.threads.length, 1, 'and archived instead');
+  } finally {
+    await cleanup(resource);
+  }
+});
+
+test('an ordinary message still reaches the model', async () => {
+  const { createGuardedHandler } = await import('../src/mastra/guard.ts');
+  const posted: string[] = [];
+  const thread = { id: 'telegram:x', post: async (m: unknown) => { posted.push(String(m)); } };
+  let defaultHandlerRan = false;
+  await createGuardedHandler('dm')(
+    thread as never,
+    { id: 'm2', text: 'what is the weather?', author: { userId: '8440954997' }, attachments: [] } as never,
+    async () => { defaultHandlerRan = true; },
+    {} as never,
+  );
+  assert.equal(defaultHandlerRan, true, 'normal text must go to the agent');
+  assert.equal(posted.length, 0);
+});

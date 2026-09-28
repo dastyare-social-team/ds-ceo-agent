@@ -211,21 +211,65 @@ npm test          # asserts the chain shape and ordering
 
 ## Reasoning
 
-`src/mastra/processors/reasoning-block.ts` renders any model reasoning as a quoted
-**Thinking** section above the answer. It fires only for models that actually return
-reasoning; most free models here do not, so it is usually invisible.
+`src/mastra/processors/streaming-thinking.ts` shows the model's reasoning **as it
+arrives, then removes it**. One message is posted and edited in place, so the chat does
+not fill with a line per token; when the answer is ready that message is deleted and
+only the answer remains.
 
-It is a distinct quoted section, **not** a collapsible one. True collapsing is not
-reachable through this adapter, verified against the adapter's own converter
-(`test/reasoning.test.ts` locks both facts in):
+This replaced an earlier design that inlined reasoning into the final reply as a quoted
+block. Inlining was wrong here: the reasoning is noise to the person who asked the
+question, and it stays in the transcript forever. Showing it live still gives the signal
+that matters — the agent is working, not stuck — without leaving anything behind.
 
-- Telegram's expandable blockquote (`<blockquote expandable>`) requires
-  `parse_mode: HTML`. The Telegram adapter ships no HTML support at all —
-  `toBotApiParseMode` only ever returns `MarkdownV2`.
-- A spoiler (`||like this||`) is the one collapsible feature MarkdownV2 has, but it is
-  only produced by a `spoiler` AST node. Raw `||` in markdown text is escaped to `\|\|`
-  and renders as literal characters. An output processor can only emit text, so it
-  cannot construct that node.
+The processor cannot see the channel thread, so the guarded handler puts it on the
+per-message `requestContext` first (see `THREAD_CONTEXT_KEY`). The alternative —
+reimplementing the channel's stream-and-post loop — would bypass Mastra's signal and
+tool-approval handling on a path that is already fragile (see the streaming notes
+above).
+
+Edits are rate-limited to one every 900ms so Telegram does not throttle the chat;
+`THINKING_EDIT_THROTTLE_MS` overrides that. Every failure path is cosmetic: if Telegram
+refuses a post or an edit, the answer is still delivered.
+
+## Voice notes (local Whisper)
+
+Voice messages are transcribed **in the process**, not by an API. No transcription key
+is needed and no audio leaves the machine.
+
+    Telegram OGG/Opus bytes
+      -> ogg-opus-decoder (WASM) -> Float32 PCM at 48kHz
+      -> @huggingface/transformers -> Whisper (ONNX) -> text
+
+`src/mastra/voice.ts` holds this. The flow exists because no free chat model on the
+chain accepts audio, so the words have to exist before the model is called.
+
+The transcript is echoed back as `🎤 Heard: ...` before the answer, so a misheard
+message can be corrected instead of answered wrongly. A voice note that already has a
+caption is left alone — the caption is the text.
+
+| Variable | Default | Notes |
+| --- | --- | --- |
+| `WHISPER_MODEL` | `Xenova/whisper-tiny.en` | Use `Xenova/whisper-base` for multilingual or better accuracy. |
+| `WHISPER_DTYPE` | `q8` | `q4` is smaller and faster, `fp32` is most accurate and largest. |
+| `THINKING_EDIT_THROTTLE_MS` | `900` | Live-thinking edit rate limit. |
+
+### Two deployment facts worth knowing
+
+1. **First voice note after a cold start is slow.** Weights are fetched from Hugging
+   Face on first use and cached on disk. On Vercel that cache is per-instance in
+   `/tmp`, so it is not shared. `warmVoiceModel()` runs at boot to pay the download
+   early, and the model is loaded once per process and reused.
+
+2. **Function bundle size is the real risk.** `onnxruntime-node` is a hard dependency of
+   `@huggingface/transformers` and ships prebuilt binaries for every platform
+   (~287MB: darwin 85MB + win32 133MB + linux 68MB). Vercel's Node function limit is
+   250MB uncompressed, so a naive deploy can fail on size. `vercel.json` excludes the
+   darwin and win32 binaries, keeping only linux. This is verified locally but not
+   against a real Vercel deploy — if the deploy fails on size, the fallback is to force
+   the WASM backend (no native binaries) at the cost of slower inference.
+
+Verified locally end to end on a real 2s OGG/Opus file: decode plus inference in about
+1s on `whisper-tiny.en`.
 
 ## Chat history and commands
 

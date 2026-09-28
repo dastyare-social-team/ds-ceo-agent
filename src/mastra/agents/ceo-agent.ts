@@ -7,7 +7,7 @@ import { waitUntil } from '@vercel/functions';
 import { env } from '../env.ts';
 import { createGuardedHandler } from '../guard.ts';
 import { assistantModel, openRouterReasoningOptions } from '../model.ts';
-import { ReasoningBlockProcessor } from '../processors/reasoning-block.ts';
+import { StreamingThinkingProcessor } from '../processors/streaming-thinking.ts';
 
 /**
  * Web search is only wired up when a Tavily key is present, so the agent boots
@@ -65,7 +65,7 @@ export const ceoAgent = new Agent({
     },
   }),
   tools,
-  outputProcessors: [new ReasoningBlockProcessor()],
+  outputProcessors: [new StreamingThinkingProcessor()],
   channels: {
     adapters: {
       telegram: createTelegramAdapter({

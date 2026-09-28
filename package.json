@@ -15,6 +15,7 @@
   },
   "dependencies": {
     "@chat-adapter/telegram": "latest",
+    "@huggingface/transformers": "^4.3.0",
     "@mastra/core": "latest",
     "@mastra/deployer-vercel": "latest",
     "@mastra/libsql": "latest",
@@ -24,6 +25,7 @@
     "@mastra/tavily": "latest",
     "@tavily/core": "latest",
     "@vercel/functions": "latest",
+    "ogg-opus-decoder": "^1.7.5",
     "zod": "latest"
   },
   "devDependencies": {

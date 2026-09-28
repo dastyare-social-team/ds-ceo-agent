@@ -193,7 +193,7 @@ export function assistantModelList(): ChainEntry[] {
 
 /**
  * Asks OpenRouter to return `reasoning_details`, which stream as `reasoning`
- * parts. The reasoning-block processor turns those into the quoted section on
+ * parts. The streaming-thinking processor shows them live, then removes them, so the
  * Telegram. Harmless on models that do not reason — they just return none.
  */
 export function openRouterReasoningOptions() {

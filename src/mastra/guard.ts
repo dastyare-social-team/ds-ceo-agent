@@ -1,9 +1,19 @@
 import type { ChannelHandler, ChannelHandlerContext } from '@mastra/core/channels';
 import { isAllowedUser, REJECTION_NOTICE } from './access.ts';
 import { chatHistory, parseChatCommand, recallSession, startNewChat } from './commands.ts';
+import { isVoiceMessage, transcribeVoice } from './voice.ts';
+import { THREAD_CONTEXT_KEY } from './processors/streaming-thinking.ts';
 
 /**
- * Plain text of an incoming message, or '' when it carries no text part.
+ * Plain text of an incoming message.
+ *
+ * The channel `Message` carries text on a top-level `text` property. It has no
+ * `content.parts` — that shape belongs to Mastra's *stored* messages, not to the
+ * object a channel handler receives. Reading the wrong one returned '' for every
+ * message, so every command silently fell through to the model.
+ *
+ * The stored-message shape is kept as a fallback, since a text part is the other
+ * plausible place text can live.
  */
 /**
  * Memory resource for a channel thread.
@@ -18,16 +28,24 @@ function memoryResourceId(thread: { id: string }): string {
 }
 
 function messageText(message: unknown): string {
-  const parts = (message as { content?: { parts?: unknown } })?.content?.parts;
-  if (!Array.isArray(parts)) return '';
-  let out = '';
-  for (const part of parts) {
-    if (part && typeof part === 'object' && (part as { type?: string }).type === 'text') {
-      const text = (part as { text?: unknown }).text;
-      if (typeof text === 'string') out += text;
+  const msg = message as { text?: unknown; content?: { parts?: unknown; content?: unknown } };
+
+  if (typeof msg.text === 'string' && msg.text.trim()) return msg.text;
+
+  const parts = msg.content?.parts;
+  if (Array.isArray(parts)) {
+    let out = '';
+    for (const part of parts) {
+      if (part && typeof part === 'object' && (part as { type?: string }).type === 'text') {
+        const text = (part as { text?: unknown }).text;
+        if (typeof text === 'string') out += text;
+      }
     }
+    if (out.trim()) return out;
   }
-  return out;
+
+  const raw = msg.content?.content;
+  return typeof raw === 'string' ? raw : '';
 }
 
 /**
@@ -98,6 +116,39 @@ export function createGuardedHandler(
           await thread.post(`Could not run /${command}. Try again in a moment.`);
         }
         return;
+      }
+
+      /**
+       * Voice is transcribed before the model sees it, because no free chat
+       * model on the chain accepts audio. The transcript replaces the text so the
+       * agent reasons over words, and the user is shown what was heard so a
+       * misheard message can be corrected instead of answered wrongly.
+       */
+      if (isVoiceMessage(message as never)) {
+        try {
+          const { text: transcript, seconds } = await transcribeVoice(message as never);
+          await thread.post(`🎤 Heard (local Whisper, ${Math.round(seconds)}s): ${transcript}`);
+          await defaultHandler(
+            thread,
+            // Same message with the transcript as its text, so threading, memory
+            // and the agent all behave exactly as they do for typed input.
+            { ...message, text: transcript } as never,
+          );
+        } catch (error) {
+          const detail = String((error as Error)?.message ?? error);
+          const logger = ctx?.mastra?.getLogger?.();
+          const line = `[voice] transcription failed: ${detail}`;
+          if (logger) logger.error(line);
+          else console.error(line);
+          await thread.post(`Could not transcribe that voice message. ${detail}`);
+        }
+        return;
+      }
+
+      // The thinking processor cannot see the channel thread on its own, so put
+      // it on the per-message request context before handing off.
+      if (ctx?.requestContext && typeof ctx.requestContext.set === 'function') {
+        ctx.requestContext.set(THREAD_CONTEXT_KEY, thread);
       }
 
       await defaultHandler(thread, message);

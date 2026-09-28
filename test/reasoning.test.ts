@@ -1,30 +1,28 @@
 /**
  * Reasoning-rendering and model-chain tests. Run with: npm test
  *
- * The Telegram rendering tests lock in *why* the reasoning block is a quote and
- * not a collapsible section. Both facts were verified against the adapter's own
- * converter, and both are easy to regress by "improving" the processor to use
- * `||spoiler||` or `<blockquote expandable>` — which does not work.
+ * Reasoning used to be inlined into the final answer as a quoted block. It is now
+ * streamed live and then deleted, so the tests below cover that lifecycle, plus the
+ * escaping rules the Telegram converter enforces (no `||spoiler||`, no expandable
+ * blockquote) that any future change must not break.
  */
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { readFileSync } from 'node:fs';
 import { TelegramFormatConverter } from '@chat-adapter/telegram';
-import { ReasoningBlockProcessor } from '../src/mastra/processors/reasoning-block.ts';
+import { RequestContext } from '@mastra/core/request-context';
+import {
+  StreamingThinkingProcessor,
+  THREAD_CONTEXT_KEY,
+} from '../src/mastra/processors/streaming-thinking.ts';
 import {
   OPENROUTER_FREE_CHAIN,
-  resolveModel,
   assistantModel,
   assistantModelChain,
+  assistantModelList,
+  resolveModel,
 } from '../src/mastra/model.ts';
 
-type AnyRecord = Record<string, unknown>;
-
-/**
- * A chain entry's model is either a plain string (OpenRouter, resolved by
- * Mastra's provider router) or a Zen config object carrying its own `id` and
- * `url`. Normalise to the id so ordering can be asserted.
- */
 function modelId(entry: { model: unknown }): string {
   const m = entry.model;
   if (typeof m === 'string') return m;
@@ -51,68 +49,118 @@ function withEnv<T>(vars: Record<string, string | undefined>, fn: () => T): T {
   }
 }
 
-/** Minimal message shape the processor reads. */
-function message(parts: unknown[], content = 'The answer is 42.') {
-  return { content: { parts, content } } as unknown as AnyRecord;
+// --- streaming thinking: show it live, then remove it ------------------------
+
+/** A Telegram thread stand-in that records what a user would have seen. */
+function fakeThread() {
+  const seen: string[] = [];
+  const sent = {
+    edits: 0,
+    async edit(text: string) {
+      this.edits += 1;
+      seen[0] = text;
+      return sent;
+    },
+    async delete() {
+      seen.length = 0;
+    },
+  };
+  return {
+    seen,
+    sent,
+    async post(text: string) {
+      seen.push(text);
+      return sent;
+    },
+  };
 }
 
-function step(reasoning: unknown) {
-  return { reasoning };
+const reasoningChunk = (text: string) => ({ type: 'reasoning', text });
+
+async function stream(parts: unknown[]) {
+  const thread = fakeThread();
+  const requestContext = new RequestContext();
+  requestContext.set(THREAD_CONTEXT_KEY, thread);
+  const processor = new StreamingThinkingProcessor();
+  const state: Record<string, unknown> = {};
+  for (let i = 0; i < parts.length; i += 1) {
+    await processor.processOutputStream({
+      part: parts[i],
+      streamParts: parts.slice(0, i + 1),
+      state,
+      requestContext,
+    } as never);
+  }
+  return { thread, processor, state };
 }
 
-function run(parts: unknown[], steps: unknown[]) {
-  const messages = [message(parts)];
-  new ReasoningBlockProcessor().processOutputResult({
-    messages,
-    messageList: {},
-    result: { steps },
+test('reasoning is posted to the chat while it streams', async () => {
+  const { thread } = await stream([reasoningChunk('Weighing options.')]);
+  assert.equal(thread.seen.length, 1);
+  assert.match(thread.seen[0], /Thinking/);
+  assert.match(thread.seen[0], /Weighing options\./);
+});
+
+test('reasoning split across chunks is joined, not truncated to the first', async () => {
+  // Edits are rate-limited, so disable the throttle to observe every update.
+  const previous = process.env.THINKING_EDIT_THROTTLE_MS;
+  process.env.THINKING_EDIT_THROTTLE_MS = '0';
+  try {
+    const { thread } = await stream([reasoningChunk('Weighing '), reasoningChunk('the options.')]);
+    assert.match(thread.seen[0], /Weighing the options\./);
+  } finally {
+    if (previous === undefined) delete process.env.THINKING_EDIT_THROTTLE_MS;
+    else process.env.THINKING_EDIT_THROTTLE_MS = previous;
+  }
+});
+
+test('the thinking message is removed once the answer is ready', async () => {
+  const { thread, processor, state } = await stream([reasoningChunk('Weighing options.')]);
+  assert.equal(thread.seen.length, 1, 'visible while thinking');
+  await processor.processOutputResult({ state, messageList: {}, result: { steps: [] } } as never);
+  assert.equal(thread.seen.length, 0, 'gone before the answer is sent');
+});
+
+test('non-reasoning chunks never post anything', async () => {
+  const { thread } = await stream([{ type: 'text', text: 'The answer is 42.' }]);
+  assert.equal(thread.seen.length, 0);
+});
+
+test('with no thread on the context the processor is inert, not fatal', async () => {
+  const processor = new StreamingThinkingProcessor();
+  const state: Record<string, unknown> = {};
+  await processor.processOutputStream({
+    part: reasoningChunk('Weighing.'),
+    streamParts: [reasoningChunk('Weighing.')],
+    state,
+    requestContext: new RequestContext(),
   } as never);
-  return messages[0].content.content as string;
-}
-
-const chunk = (text: string) => [{ type: 'reasoning', payload: { text } }];
-
-test('no reasoning leaves the message untouched', () => {
-  assert.equal(run([{ type: 'text', text: 'hi' }], [step(undefined)]), 'The answer is 42.');
+  await processor.processOutputResult({ state, messageList: {}, result: { steps: [] } } as never);
 });
 
-test('prepends a quoted Thinking block from step reasoning', () => {
-  const out = run([{ type: 'text', text: 'hi' }], [step([chunk('Weighing options.')])]);
-  assert.match(out, /\*\*Thinking\*\*/);
-  assert.match(out, /Weighing options\./);
-  assert.match(out, /The answer is 42\./);
-  assert.ok(out.indexOf('Thinking') < out.indexOf('42'), 'block must come before the answer');
+test('a Telegram failure while showing progress does not fail the turn', async () => {
+  const requestContext = new RequestContext();
+  requestContext.set(THREAD_CONTEXT_KEY, {
+    post: async () => {
+      throw new Error('Telegram is down');
+    },
+  });
+  const processor = new StreamingThinkingProcessor();
+  const state: Record<string, unknown> = {};
+  await processor.processOutputStream({
+    part: reasoningChunk('Weighing.'),
+    streamParts: [reasoningChunk('Weighing.')],
+    state,
+    requestContext,
+  } as never);
+  await processor.processOutputResult({ state, messageList: {}, result: { steps: [] } } as never);
 });
 
-test('reads reasoning from message parts when steps carry none', () => {
-  const out = run([{ type: 'reasoning', text: 'From the message part.' }], [step(undefined)]);
-  assert.match(out, /From the message part\./);
+test('a long monologue is trimmed in the preview, not dumped into the chat', async () => {
+  const { thread } = await stream([reasoningChunk('word '.repeat(500))]);
+  assert.ok(thread.seen[0].length < 600, `preview was ${thread.seen[0].length} chars`);
+  assert.match(thread.seen[0], /…/);
 });
-
-test('does not repeat reasoning reported by both steps and parts', () => {
-  const out = run([{ type: 'reasoning', text: 'Same thought.' }], [step([chunk('Same thought.')])]);
-  assert.equal(out.match(/Same thought\./g)?.length, 1);
-});
-
-test('truncates a runaway monologue and says so', () => {
-  const out = run([{ type: 'text', text: 'hi' }], [step([chunk('x'.repeat(4000))])]);
-  assert.match(out, /chars\)/);
-  assert.ok(!out.includes('x'.repeat(2000)), 'long body must be cut');
-});
-
-test('quotes every reasoning line and separates the block from the answer', () => {
-  const out = run([{ type: 'text', text: 'hi' }], [step([chunk('line one\nline two')])]);
-  // The block is everything before the blank separator; the answer follows it and
-  // must stay unquoted.
-  const [block, ...rest] = out.split('\n');
-  assert.equal(block, '> **Thinking**');
-  const idx = out.indexOf('\n\n');
-  const blockLines = out.slice(0, idx).split('\n');
-  for (const line of blockLines) assert.ok(line.startsWith('>'), `unquoted: ${line}`);
-  assert.equal(rest[rest.length - 1], 'The answer is 42.');
-  assert.match(out, /^\> \*\*Thinking\*\*\n> line one line two\n\nThe answer is 42\.$/);
-});
-
 test('the agent ships a SINGLE model, because an array deadlocks streaming', () => {
   // Mastra's channel streams. With a model array, agent.stream() never resolves
   // on @mastra/core 1.71.0 and every inbound message hangs silently.

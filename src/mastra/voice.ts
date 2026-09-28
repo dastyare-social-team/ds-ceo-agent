@@ -58,6 +58,26 @@ export function providerLabel(provider: TranscribeProvider): string {
 
 type AudioAttachment = { type?: string; fetchData?: () => Promise<unknown> };
 
+/**
+ * The message to hand to the agent once a transcript exists: text replaced by the
+ * transcript, audio attachments removed.
+ *
+ * Dropping the audio is the point. Setting the text is not enough, because the
+ * voice note arrives as an attachment and the adapter forwards it to the model
+ * along with the text. A text-only model then answers that it can see the audio
+ * file but cannot play or transcribe it, and the real transcript is ignored.
+ * Nothing is listening twice, so the file has no reason to be forwarded.
+ */
+export function withTranscript(message: unknown, transcript: string): unknown {
+  const original = (message ?? {}) as { attachments?: unknown };
+  const attachments = (original.attachments ?? []) as AudioAttachment[];
+  return {
+    ...original,
+    text: transcript,
+    attachments: attachments.filter((a) => a?.type !== 'audio'),
+  };
+}
+
 /** True for a voice message: audio attached, and no caption that already says it. */
 export function isVoiceMessage(message: unknown): boolean {
   const m = message as { text?: unknown; attachments?: unknown };

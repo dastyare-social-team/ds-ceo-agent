@@ -227,10 +227,15 @@ handler, outside the run, the same I/O is safe.
 
 ## Voice notes (Groq Whisper, local sherpa-onnx fallback)
 
-Voice messages are transcribed by **Groq**, and echoed as `🎤 Heard (...): ...`
+Voice messages are transcribed by **Groq**, and echoed as `**you said — **...`
 before the answer, so a misheard message can be corrected rather than answered
 wrongly. A note that already has a caption is left alone, since the caption is
 the text.
+
+The voice file is removed before the message reaches the agent. A voice note is an
+*attachment*, so replacing the text alone left the audio in place and the model
+answered that it could see the file but could not play it, ignoring the
+transcript. Which engine ran is logged, not shown.
 
     Telegram OGG/Opus bytes
       -> POST https://api.groq.com/openai/v1/audio/transcriptions -> text
@@ -258,8 +263,8 @@ Read on every voice note, so a redeploy that only changes the variable is enough
 | `groq` | Groq only. A missing key is an error, never a silent switch to local. |
 | `local` | sherpa-onnx only, ignoring any key. No network at all. |
 
-The engine is named in the `Heard` line, because the default sends audio to a
-third party and a reader of the transcript deserves to know.
+The engine is written to the debug log rather than the chat, and the transcript
+line stays plain: `**you said — **...`.
 
 ### Privacy
 

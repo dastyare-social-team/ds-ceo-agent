@@ -2,7 +2,7 @@ import type { ChannelHandler, ChannelHandlerContext } from '@mastra/core/channel
 import { isAllowedUser, REJECTION_NOTICE } from './access.ts';
 import { chatHistory, parseChatCommand, recallSession, startNewChat } from './commands.ts';
 import type { SentMessageLike } from './processors/progress-types.ts';
-import { isVoiceMessage, providerLabel, transcribeVoice } from './voice.ts';
+import { isVoiceMessage, providerLabel, transcribeVoice, withTranscript } from './voice.ts';
 
 /**
  * Plain text of an incoming message.
@@ -151,14 +151,19 @@ export function createGuardedHandler(
       if (isVoiceMessage(message as never)) {
         try {
           const { text: transcript, seconds, provider } = await transcribeVoice(message as never);
-          // The engine is named because the default is hosted: someone reading
-          // their own transcript deserves to know where the audio went.
-          await thread.post(`🎤 Heard (${providerLabel(provider)}, ${Math.round(seconds)}s): ${transcript}`);
+          // Bold via standard markdown: the Telegram adapter converts the AST to
+          // MarkdownV2, where strong becomes *bold*. The engine is not named —
+          // the transcript line is for the user, not for a status page.
+          await thread.post(`**you said — **${transcript}`);
+          ctx?.mastra?.getLogger?.().debug?.(
+            `[voice] ${Math.round(seconds)}s transcribed by ${providerLabel(provider)}`,
+          );
           await defaultHandler(
             thread,
-            // Same message with the transcript as its text, so threading, memory
-            // and the agent all behave exactly as they do for typed input.
-            { ...message, text: transcript } as never,
+            // Transcript as the text and the audio removed, so threading, memory
+            // and the agent all behave exactly as they do for typed input, and the
+            // model is not handed a voice file it cannot read.
+            withTranscript(message, transcript) as never,
           );
         } catch (error) {
           const detail = String((error as Error)?.message ?? error);

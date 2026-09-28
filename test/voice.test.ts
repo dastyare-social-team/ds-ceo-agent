@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { isVoiceMessage, providerLabel, transcribeVoice } from '../src/mastra/voice.ts';
+import { isVoiceMessage, providerLabel, transcribeVoice, withTranscript } from '../src/mastra/voice.ts';
 
 const voice = (extra: Record<string, unknown> = {}) => ({
   text: '',
@@ -204,6 +204,50 @@ test('when both engines fail the hosted reason is reported first', async () => {
 test('the engine is named so the Heard line does not misreport where audio went', () => {
   assert.equal(providerLabel('groq'), 'Groq Whisper');
   assert.equal(providerLabel('local'), 'local Whisper');
+});
+
+// --- the message the agent finally receives ---------------------------------
+
+test('the transcript replaces the text', () => {
+  const handed = withTranscript(voice(), 'can you hear me') as { text: string };
+  assert.equal(handed.text, 'can you hear me');
+});
+
+test('the voice file is not handed to the model alongside the transcript', () => {
+  // The bug this pins: a voice note is an *attachment*, so replacing the text
+  // left the audio in place. The model then answered that it could see the audio
+  // file but could not play or transcribe it, and ignored the transcript.
+  const handed = withTranscript(voice(), 'can you hear me') as { attachments: { type: string }[] };
+  assert.deepEqual(handed.attachments, []);
+  assert.equal(handed.attachments.some((a) => a.type === 'audio'), false);
+});
+
+test('non-audio attachments survive, so a caption photo is not silently dropped', () => {
+  const withPhoto = {
+    text: '',
+    attachments: [
+      { type: 'image', fetchData: async () => new Uint8Array([1]) },
+      { type: 'audio', fetchData: async () => new Uint8Array([2]) },
+    ],
+  };
+  const handed = withTranscript(withPhoto, 'look at this') as { attachments: { type: string }[] };
+  assert.deepEqual(handed.attachments.map((a) => a.type), ['image']);
+});
+
+test('other fields are preserved, since memory keys off the message shape', () => {
+  const handed = withTranscript(
+    { ...voice(), id: 'm-1', channelMessageId: 'c-1', from: 'u-1' },
+    'hi',
+  ) as Record<string, unknown>;
+  assert.equal(handed.id, 'm-1');
+  assert.equal(handed.channelMessageId, 'c-1');
+  assert.equal(handed.from, 'u-1');
+});
+
+test('a message with no attachments at all does not throw', () => {
+  const handed = withTranscript({ text: '' }, 'hi') as { text: string; attachments: unknown[] };
+  assert.equal(handed.text, 'hi');
+  assert.deepEqual(handed.attachments, []);
 });
 
 // --- deployment config guard ------------------------------------------------

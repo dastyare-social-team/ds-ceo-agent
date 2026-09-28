@@ -11,7 +11,8 @@
     "typecheck": "tsc --noEmit",
     "webhook": "node scripts/set-webhook.mjs",
     "webhook:remove": "node scripts/set-webhook.mjs --remove",
-    "test": "node --env-file=.env --test test/*.test.ts"
+    "test": "node --env-file=.env --test test/*.test.ts",
+    "check:bundle": "node scripts/check-bundle-size.mjs"
   },
   "dependencies": {
     "@chat-adapter/telegram": "latest",

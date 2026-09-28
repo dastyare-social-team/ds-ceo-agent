@@ -73,11 +73,3 @@ test('vercel.json function options use the shapes Vercel accepts', async () => {
   }
 });
 
-test('the native ONNX build for other platforms is pruned, not all of them', async () => {
-  const { readFileSync } = await import('node:fs');
-  const config = JSON.parse(readFileSync(new URL('../vercel.json', import.meta.url), 'utf8'));
-  const excluded = Object.values(config.functions ?? {}).map((o) => o.excludeFiles ?? '').join(',');
-  assert.match(excluded, /darwin/, 'darwin binaries are the largest and are not needed on Vercel');
-  assert.match(excluded, /win32/);
-  assert.equal(/linux/.test(excluded), false, 'linux is the platform Vercel runs, so it must survive');
-});

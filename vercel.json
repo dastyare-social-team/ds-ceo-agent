@@ -1,8 +1,3 @@
 {
-  "$schema": "https://openapi.vercel.sh/vercel.json",
-  "functions": {
-    "api/**": {
-      "excludeFiles": "node_modules/onnxruntime-node/bin/napi-v6/{darwin,win32}/**"
-    }
-  }
+  "$schema": "https://openapi.vercel.sh/vercel.json"
 }

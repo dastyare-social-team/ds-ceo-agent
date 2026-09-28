@@ -81,7 +81,7 @@ export interface GuardOptions {
  * Extracted from the agent config so it can be tested directly, without
  * depending on Telegram transport mode or a live webhook.
  */
-const THINKING_LABEL = '\u{1F9E0} Thinking';
+const THINKING_LABEL = '🧠 Thinking';
 const THINKING_TICK_MS = 5_000;
 
 /**
@@ -179,11 +179,11 @@ export function createGuardedHandler(
        * is still in progress for the timer to report against.
        */
       const started = Date.now();
-      const status = await thread.post(`${THINKING_LABEL}\\u2026`);
+      const status = await thread.post(`${THINKING_LABEL}…`);
       const tick = setInterval(() => {
         const seconds = Math.round((Date.now() - started) / 1000);
         // Not awaited: this fires on a timer while the run owns the channel.
-        void status.edit?.(`${THINKING_LABEL}\\u2026 ${seconds}s`).catch(() => undefined);
+        void status.edit?.(`${THINKING_LABEL}… ${seconds}s`).catch(() => undefined);
       }, THINKING_TICK_MS);
 
       let failed: unknown;
@@ -201,9 +201,9 @@ export function createGuardedHandler(
         const detail = errorDetail(failed);
         ctx?.mastra?.getLogger?.().error(`[agent] run failed: ${detail}`);
         try {
-          await status.edit?.(`\\u274c ${detail}`);
+          await status.edit?.(`❌ ${detail}`);
         } catch {
-          await thread.post(`\\u274c ${detail}`).catch(() => undefined);
+          await thread.post(`❌ ${detail}`).catch(() => undefined);
         }
         return;
       }

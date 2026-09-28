@@ -12,7 +12,8 @@
     "webhook": "node scripts/set-webhook.mjs",
     "webhook:remove": "node scripts/set-webhook.mjs --remove",
     "test": "node --env-file=.env --test test/*.test.ts",
-    "check:bundle": "node scripts/check-bundle-size.mjs"
+    "check:bundle": "node scripts/check-bundle-size.mjs",
+    "slim:bundle": "node scripts/slim-bundle.mjs"
   },
   "dependencies": {
     "@chat-adapter/telegram": "latest",
@@ -27,6 +28,8 @@
     "@vercel/functions": "latest",
     "ogg-opus-decoder": "^1.7.5",
     "sherpa-onnx-node": "^1.13.8",
+    "tar-stream": "^3.2.1",
+    "unbzip2-stream": "^1.4.3",
     "zod": "latest"
   },
   "devDependencies": {

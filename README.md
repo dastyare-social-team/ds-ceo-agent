@@ -285,6 +285,32 @@ k2-fsa/sherpa-onnx `asr-models`; the loader downloads and unpacks whatever is
 named. Note that the file naming inside those archives differs — see `stem()` in
 `src/mastra/voice.ts`.
 
+### Trimming the bundle
+
+`npm run build` produces a ~199MB function, of which ~81MB is files the
+function never reads: 1130 sourcemaps (60MB) and 1053 type declarations (21MB)
+that ship because the deployer copies whole packages. Vercel's limit is 250MB, so
+there is room, but the headroom is better spent elsewhere.
+
+    npm run build && npm run slim:bundle
+
+That brings it to **118MB**. It removes only `.map` and `.d.ts` sidecars.
+
+The TypeScript compiler (24MB) is deliberately **not** removed. It reaches the
+output through `typescript-paths`, which the deployer uses at build time to
+resolve path aliases, and while no shipped module imports it, Mastra's
+provider-registry probes for TypeScript at runtime and builds paths under a cache
+directory. Removing the compiler and its lib files together is the one change here
+that would need a real deploy to prove safe, and 24MB is not worth guessing over.
+
+`npm run check:bundle` reports the size against Vercel's limit and exits non-zero
+if a function is too big, so this fails locally in seconds rather than after a
+deploy.
+
+Verified: after trimming, the built entry still loads and exports its HTTP
+handlers, and every one of the 3419 relative imports across the bundle resolves.
+The only unresolved paths are inside documentation comments in dead code.
+
 ## Chat history and commands
 
 The agent remembers. Each Telegram chat maps to one Mastra thread, and the agent

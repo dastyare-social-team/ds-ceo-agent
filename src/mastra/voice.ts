@@ -1,8 +1,9 @@
-import { existsSync, mkdirSync, readdirSync } from 'node:fs';
+import { createWriteStream, existsSync, mkdirSync, readdirSync } from 'node:fs';
+import { Readable } from 'node:stream';
+import { dirname } from 'node:path';
+import { pipeline as streamPipeline } from 'node:stream/promises';
 import { join } from 'node:path';
 import { createRequire } from 'node:module';
-import { execFile } from 'node:child_process';
-import { promisify } from 'node:util';
 
 /**
  * Voice notes, transcribed locally.
@@ -21,8 +22,6 @@ import { promisify } from 'node:util';
  * Nothing is imported eagerly. The Opus decoder and the recogniser are both loaded
  * on first use, so a text-only run never pays for them.
  */
-
-const run = promisify(execFile);
 
 const DEFAULT_MODEL = 'sherpa-onnx-whisper-tiny.en';
 const ASR_SAMPLE_RATE = 16_000;
@@ -131,16 +130,62 @@ async function ensureModel(): Promise<string> {
   if (!response.ok) {
     throw new Error(`Could not download the speech model (HTTP ${response.status}) from ${url}`);
   }
-  const bytes = new Uint8Array(await response.arrayBuffer());
-  const { writeFileSync } = await import('node:fs');
-  writeFileSync(archive, bytes);
-  // `tar` is present on the platforms this runs on; bzip2 is what the archive uses.
-  await run('tar', ['xjf', archive, '-C', cacheRoot()]);
+  const bytes = Buffer.from(await response.arrayBuffer());
+  await extractBzip2Tar(bytes, cacheRoot());
 
   if (!existsSync(files.encoder) || !existsSync(files.decoder) || !existsSync(files.tokens)) {
     throw new Error(`Speech model archive did not contain the expected files in ${dir}`);
   }
   return dir;
+}
+
+/**
+ * Unpacks a .tar.bz2 entirely in JavaScript.
+ *
+ * This used to shell out to `tar xjf`, which worked on a laptop and failed on
+ * Vercel with `spawn tar ENOENT`: the serverless Node runtime has no tar on
+ * PATH, and a missing binary is a runtime error the bot can only report after
+ * deployment. tar-stream plus unbzip2-stream have no native build and no external
+ * process, so the same path works on Vercel, Docker, and a workstation.
+ *
+ * Entries are written only under the destination directory; a path traversal in
+ * the archive is skipped rather than followed.
+ */
+async function extractBzip2Tar(bytes: Buffer, destination: string): Promise<void> {
+  // Both packages are CommonJS. unbzip2-stream's module.exports is the stream
+  // factory itself rather than an object with createBzip2 on it, so it is
+  // resolved through createRequire and called directly.
+  const require = createRequire(import.meta.url);
+  const createBzip2 = require('unbzip2-stream') as () => NodeJS.ReadWriteStream;
+  const { extract } = require('tar-stream') as {
+    extract: () => NodeJS.ReadWriteStream & {
+      on: (e: string, f: (h: { name: string; type?: string }, s: NodeJS.ReadableStream, n: (err?: Error | null) => void) => void) => void;
+    };
+  };
+
+  const extractor = extract();
+  const written: Promise<void>[] = [];
+
+  extractor.on('entry', (header, stream, next) => {
+    const target = join(destination, header.name);
+    // Refuse anything that would escape the destination directory.
+    if (!target.startsWith(destination) || header.type === 'directory') {
+      stream.resume();
+      next();
+      return;
+    }
+    mkdirSync(dirname(target), { recursive: true });
+    written.push(
+      streamPipeline(stream, createWriteStream(target)).then(() => next()),
+    );
+  });
+
+  await streamPipeline(
+    Readable.from([bytes]),
+    createBzip2(),
+    extractor,
+  );
+  await Promise.all(written);
 }
 
 let recognizer: unknown;

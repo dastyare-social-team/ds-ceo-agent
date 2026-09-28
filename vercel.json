@@ -1,12 +1,8 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
   "functions": {
-    "api/agents/ceo-agent/stream.ts": {
-      "maxDuration": 300
+    "api/**": {
+      "excludeFiles": "node_modules/onnxruntime-node/bin/napi-v6/{darwin,win32}/**"
     }
-  },
-  "excludeFiles": [
-    "node_modules/onnxruntime-node/bin/napi-v6/darwin/**",
-    "node_modules/onnxruntime-node/bin/napi-v6/win32/**"
-  ]
+  }
 }

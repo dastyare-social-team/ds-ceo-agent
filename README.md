@@ -225,89 +225,60 @@ resolves, so awaiting a send inside a processor deadlocks. There is no error and
 nothing in the logs; the webhook returns 200 and the bot goes silent. From the
 handler, outside the run, the same I/O is safe.
 
-## Voice notes (Groq Whisper, local sherpa-onnx fallback)
+## Voice notes (Groq Whisper)
 
-Voice messages are transcribed by **Groq**, and echoed as `**you said — **...`
-before the answer, so a misheard message can be corrected rather than answered
-wrongly. A note that already has a caption is left alone, since the caption is
-the text.
-
-The voice file is removed before the message reaches the agent. A voice note is an
-*attachment*, so replacing the text alone left the audio in place and the model
-answered that it could see the file but could not play it, ignoring the
-transcript. Which engine ran is logged, not shown.
+Voice messages are transcribed by **Groq**, and echoed as a bold `**you said — **`
+line before the answer, so a misheard message can be corrected rather than
+answered wrongly. A note that already has a caption is left alone.
 
     Telegram OGG/Opus bytes
       -> POST https://api.groq.com/openai/v1/audio/transcriptions -> text
 
 Whisper reads the OGG/Opus container directly, so the bytes are uploaded exactly
-as received — no decoder, no resampling, no WAV. A 4s voice note comes back in
-**0.7s** and accuracy is better than the local engine on the same file
-(`Hester Prynne` vs `Hester print`).
+as received — no decoder, no resampling, no WAV. A 4s note comes back in **0.7s**,
+and it is more accurate than the local engine it replaced (*Hester Prynne* vs
+*Hester print*).
 
 | Variable | Default | Notes |
 | --- | --- | --- |
-| `GROQ_API_KEY` | — | Free tier, no credit card. Without it the bot runs local. |
-| `TRANSCRIBE_PROVIDER` | `auto` | `auto` / `groq` / `local`. See below. |
+| `GROQ_API_KEY` | — | Free tier, no credit card. Required for voice. |
 | `GROQ_STT_MODEL` | `whisper-large-v3` | `whisper-large-v3-turbo` is faster and cheaper on quota. |
-| `WHISPER_MODEL` | `sherpa-onnx-whisper-tiny.en` | Local fallback. English only. |
-| `WHISPER_CACHE_DIR` | `/tmp/sherpa-models` | Must be writable. Never inside `node_modules`. |
+| `GROQ_STT_URL` | Groq | Point at a self-hosted endpoint if audio must not leave. |
 
-### Which engine runs
+Audio is sent to Groq. That is the one privacy trade-off in this design; the
+alternative was a local ONNX model, which needed a platform-native binary in the
+deployed artifact and re-downloaded weights on every cold start.
 
-Read on every voice note, so a redeploy that only changes the variable is enough.
+### Two bugs worth remembering
 
-| `TRANSCRIBE_PROVIDER` | Behaviour |
-| --- | --- |
-| `auto` (default) | Groq when `GROQ_API_KEY` is set, local otherwise. If the hosted call fails it retries locally and reports **both** errors. |
-| `groq` | Groq only. A missing key is an error, never a silent switch to local. |
-| `local` | sherpa-onnx only, ignoring any key. No network at all. |
+**The model was still being handed the audio.** A voice note arrives as an
+*attachment*, and the adapter forwards attachments to the model alongside text. So
+replacing the text was not enough — the model answered the file
+(*"I can see the audio file, but I can't play or transcribe it"*) and ignored a
+perfect transcript sitting right there. `withTranscript()` strips audio
+attachments before the model is called.
 
-The engine is written to the debug log rather than the chat, and the transcript
-line stays plain: `**you said — **...`.
+**The placeholder poisoned memory.** Even after the fix, the bot kept refusing,
+because the old rows were still in Postgres: each stored
+`[Attached file: file (audio/ogg)]` next to its transcript, inside the 20-message
+recall window. A text-only model reading that in its own history concludes it
+cannot do audio, for many turns after the audio stopped being passed. Stripping
+it from the *current* message is not enough; the history has to be cleaned:
 
-### Privacy
+    node --env-file=.env scripts/clean-voice-history.mjs           # dry run
+    node --env-file=.env scripts/clean-voice-history.mjs --apply   # rewrite rows
 
-`auto` with a key uploads audio to Groq. `local` keeps it on the machine. That
-is the only meaningful difference between the two.
+### Bold needs an object, not a string
 
-### The local fallback
-
-sherpa-onnx is retained because it needs no key, no card and no network, and
-because it is the escape hatch if the hosted quota is exhausted. Nothing imports
-it until it is the chosen engine, so a missing native binary cannot affect a run
-that Groq already served.
-
-Its one real weakness on Vercel is the cold start: int8 models download from
-GitHub on first use, cache in per-instance `/tmp`, and that cache dies with the
-instance. So a cold local run can pay ~2 min, which is exactly the cost the hosted
-path removes. Nothing is downloaded at boot, deliberately — doing that in
-`index.ts` stalled module evaluation and took the whole bot offline.
-
-### Why sherpa-onnx and not transformers.js
-
-The first local implementation used `@huggingface/transformers`, which pulls in
-both `onnxruntime-node` and `onnxruntime-web` as **hard** dependencies: 427MB of
-inference backends for every platform at once, against a 250MB Vercel limit.
-sherpa-onnx is a 0MB JavaScript wrapper over a single platform-specific binary —
-31MB on linux-x64 — with int8 models fetched at runtime.
-
-| | transformers.js | sherpa-onnx | Groq |
-| --- | --- | --- | --- |
-| Runtime weight | 427MB | 31MB | 0 |
-| Function bundle | 660.9MB (over limit) | 199.0MB | 199.0MB |
-| 4s voice note, warm | ~60s | 0.3s | **0.7s from cold** |
-| First use | 60s | ~2 min, 118MB download | none |
+`thread.post("**bold**")` arrives as literal asterisks. The Telegram adapter
+resolves parse mode by shape: a **string** is sent verbatim in `plain` mode, and
+only an object with a `markdown` key is rendered as MarkdownV2. So bold requires
+`thread.post({ markdown: '**you said — ** ...' })`.
 
 ### Other languages
 
-`whisper-tiny.en` is English-only, but the hosted default is not:
-`whisper-large-v3` is multilingual, so Persian works with no configuration.
-For local Persian, set `WHISPER_MODEL` to a multilingual release under
-k2-fsa/sherpa-onnx `asr-models` (`sherpa-onnx-whisper-base` and larger, or
-`sense-voice` for zh/en/ja/ko/yue). The loader downloads and unpacks whatever
-is named; file naming inside those archives differs, see `stem()` in
-`src/mastra/voice.ts`.
+`whisper-large-v3` is multilingual, so Persian and everything else work with no
+configuration.
 
 ### Trimming the bundle
 

@@ -2,7 +2,7 @@ import type { ChannelHandler, ChannelHandlerContext } from '@mastra/core/channel
 import { isAllowedUser, REJECTION_NOTICE } from './access.ts';
 import { chatHistory, parseChatCommand, recallSession, startNewChat } from './commands.ts';
 import type { SentMessageLike } from './processors/progress-types.ts';
-import { isVoiceMessage, providerLabel, transcribeVoice, withTranscript } from './voice.ts';
+import { isVoiceMessage, transcribeVoice, withTranscript } from './voice.ts';
 
 /**
  * Plain text of an incoming message.
@@ -143,28 +143,28 @@ export function createGuardedHandler(
       }
 
       /**
-       * Voice is transcribed before the model sees it, because no free chat
-       * model on the chain accepts audio. The transcript replaces the text so the
-       * agent reasons over words, and the user is shown what was heard so a
-       * misheard message can be corrected instead of answered wrongly.
+       * Voice is transcribed before the model sees it, because no free chat model
+       * on the chain accepts audio. The transcript is shown to the user so a
+       * misheard message can be corrected rather than answered wrongly.
+       *
+       * The audio is stripped before the model is called. A text-only model given
+       * "[Attached file: file (audio/ogg)]" alongside real words does the only
+       * sensible thing and refuses, and worse, that placeholder is written into
+       * memory, so the refusal repeats on later turns that are pure text until
+       * the row is cleaned. See scripts/clean-voice-history.mjs.
        */
       if (isVoiceMessage(message as never)) {
         try {
-          const { text: transcript, seconds, provider } = await transcribeVoice(message as never);
-          // Bold via standard markdown: the Telegram adapter converts the AST to
-          // MarkdownV2, where strong becomes *bold*. The engine is not named —
-          // the transcript line is for the user, not for a status page.
-          await thread.post(`**you said — **${transcript}`);
-          ctx?.mastra?.getLogger?.().debug?.(
-            `[voice] ${Math.round(seconds)}s transcribed by ${providerLabel(provider)}`,
-          );
-          await defaultHandler(
-            thread,
-            // Transcript as the text and the audio removed, so threading, memory
-            // and the agent all behave exactly as they do for typed input, and the
-            // model is not handed a voice file it cannot read.
-            withTranscript(message, transcript) as never,
-          );
+          const { text: transcript, seconds } = await transcribeVoice(message as never);
+          // Posted as an object, not a string: the Telegram adapter only applies
+          // MarkdownV2 to an object with a `markdown` key. A bare string is sent
+          // verbatim in "plain" mode, so ** would arrive as literal asterisks.
+          await thread.post({ markdown: `**you said — ** ${transcript}` });
+          ctx?.mastra?.getLogger?.().debug?.(`[voice] transcribed ${Math.round(seconds)}s of audio`);
+
+          // The transcript as plain text with every attachment stripped. The
+          // message the model finally sees is indistinguishable from a typed one.
+          await defaultHandler(thread, withTranscript(message, transcript) as never);
         } catch (error) {
           const detail = String((error as Error)?.message ?? error);
           const logger = ctx?.mastra?.getLogger?.();

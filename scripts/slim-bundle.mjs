@@ -8,6 +8,11 @@
  * Run after `npm run build`, before deploy:
  *   node scripts/slim-bundle.mjs
  *
+ * This used to also declare and copy the local voice packages into the output,
+ * because the deployer omits packages the app imports and that surfaced only as a
+ * bare "Cannot find module" on Vercel. Voice is now a hosted HTTP call with no
+ * runtime packages of its own, so that whole section is gone with the engine.
+ *
  * Only sourcemaps and type declarations are removed. Two things are deliberately
  * left alone:
  *
@@ -20,8 +25,7 @@
  *
  *   - JavaScript source files. Only the .map and .d.ts sidecars go.
  */
-import { cpSync, existsSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
-import { createRequire } from 'node:module';
+import { existsSync, readFileSync, readdirSync, rmSync, statSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 
 const funcDir = resolve(process.argv[2] ?? '.vercel/output/functions/index.func');
@@ -84,121 +88,6 @@ const nodeModules = join(funcDir, 'node_modules');
 const maps = pruneFiles(nodeModules, (name) => name.endsWith('.map'));
 // Type declarations. Only read by a TypeScript compiler, which is not shipped.
 const types = pruneFiles(nodeModules, (name) => name.endsWith('.d.ts') || name.endsWith('.d.mts'));
-
-/**
- * The Mastra Vercel deployer writes its own dependency list into the output
- * package.json, and that list does not include everything the app imports.
- * Anything missing is installed by neither the build nor Vercel, so it fails at
- * runtime with a bare "Cannot find module" — which is how voice broke on Vercel
- * with `Cannot find module 'unbzip2-stream'`. Declare those packages here so
- * they are installed, and copy the tree across for the local check.
- */
-// The Linux binary is declared explicitly, not left to optionalDependencies.
-// The wrapper loads it by platform name, and an optional dep is only installed
-// if npm believes the platform matches; naming it removes that guesswork and
-// documents the 31MB the deploy is paying for. The other platforms stay optional
-// so local development on macOS or Windows still works.
-const TARGET_PLATFORM_PACKAGE = 'sherpa-onnx-linux-x64';
-const VOICE_PACKAGES = [
-  'sherpa-onnx-node',
-  'tar-stream',
-  'unbzip2-stream',
-  'ogg-opus-decoder',
-  TARGET_PLATFORM_PACKAGE,
-];
-const outputPkgPath = join(funcDir, 'package.json');
-
-if (existsSync(outputPkgPath)) {
-  const pkg = JSON.parse(readFileSync(outputPkgPath, 'utf8'));
-  pkg.dependencies = { ...(pkg.dependencies ?? {}) };
-
-  // The target binary is installed on the deploy host, not here: npm refuses to
-  // install a linux package on an arm64 mac, and the local tree only has the
-  // darwin one. Its version is pinned rather than read, so this works on both.
-  const PINNED = { [TARGET_PLATFORM_PACKAGE]: '1.13.8' };
-  const toDeclare = VOICE_PACKAGES.filter(
-    (name) => existsSync(join('node_modules', name, 'package.json')),
-  );
-  const unavailable = VOICE_PACKAGES.filter((name) => !toDeclare.includes(name));
-  if (unavailable.some((n) => !(n in PINNED))) {
-    console.error(`  Not installed and not pinned: ${unavailable.join(', ')}`);
-    process.exit(1);
-  }
-
-  const added = [];
-  for (const name of VOICE_PACKAGES) {
-    if (pkg.dependencies[name]) continue;
-    const version = PINNED[name] ?? JSON.parse(
-      readFileSync(join('node_modules', name, 'package.json'), 'utf8'),
-    ).version;
-    pkg.dependencies[name] = `^${version}`;
-    added.push(`${name}@${version}`);
-  }
-  if (unavailable.length) {
-    console.log(`  pinned  : ${unavailable.join(', ')} (installed on the deploy host)`);
-  }
-
-  writeFileSync(outputPkgPath, `${JSON.stringify(pkg, null, 2)}\n`);
-  console.log(`  declared : ${added.length ? added.join(', ') : '(all already declared)'}`);
-
-  // The build does not copy these across, so do it here. This also lets the
-  // bundle be booted and exercised locally instead of only on Vercel.
-  for (const name of toDeclare) {
-    const target = join(funcDir, 'node_modules', name);
-    if (existsSync(target)) continue;
-    cpSync(join('node_modules', name), target, { recursive: true, dereference: true });
-    console.log(`  copied   : ${name}`);
-  }
-}
-
-/**
- * Assert that everything the voice path loads at runtime is present in the built
- * function.
- *
- * This check exists because two failures here were invisible until deployment.
- * The deployer writes its own dependency list, omitting packages the app
- * imports, and those modules are then installed by neither the build nor Vercel.
- * The symptom is a bare "Cannot find module" at runtime on Vercel only, while
- * `npm run build` looks perfectly healthy. Resolving the imports from inside the
- * output directory is the only way to see it before deploying.
- *
- * The native binary cannot be checked this way: it is the linux build on the
- * deploy host and the darwin one here, so it is only ever present in the tree
- * that the target platform installs. The JavaScript wrappers can be checked, and
- * the binary is covered by being declared as a direct dependency above.
- */
-function assertVoicePackagesResolve() {
-  // Resolve strictly inside the output directory. createRequire walks up the
-  // filesystem, so a probe rooted here would happily find the project's own
-  // node_modules and pass even with the package missing from the function — which
-  // is exactly the false negative that let this reach production.
-  const failures = [];
-  for (const name of ['tar-stream', 'unbzip2-stream']) {
-    const pkgDir = join(funcDir, 'node_modules', name, 'package.json');
-    if (!existsSync(pkgDir)) {
-      failures.push(`${name} is not present in the function's node_modules`);
-      continue;
-    }
-    try {
-      // Loading it proves the package works, not merely that it exists.
-      const entry = join(funcDir, 'node_modules', name, JSON.parse(readFileSync(pkgDir, 'utf8')).main ?? 'index.js');
-      const req = createRequire(entry);
-      if (!req(name)) failures.push(`${name} did not load`);
-    } catch (error) {
-      failures.push(`${name}: ${String(error.message).split('\n')[0]}`);
-    }
-  }
-
-  if (failures.length) {
-    console.error('\n  Voice packages do not resolve from the built function:');
-    for (const failure of failures) console.error(`    ${failure}`);
-    console.error('  Voice would fail on deploy. Fix this before deploying.');
-    process.exit(1);
-  }
-  console.log('  voice deps: tar-stream, unbzip2-stream present in the function');
-}
-
-assertVoicePackagesResolve();
 
 const after = dirSize(funcDir);
 console.log(`  before    : ${mb(before)} MB`);

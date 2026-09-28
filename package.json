@@ -26,10 +26,6 @@
     "@mastra/tavily": "latest",
     "@tavily/core": "latest",
     "@vercel/functions": "latest",
-    "ogg-opus-decoder": "^1.7.5",
-    "sherpa-onnx-node": "^1.13.8",
-    "tar-stream": "^3.2.1",
-    "unbzip2-stream": "^1.4.3",
     "zod": "latest"
   },
   "devDependencies": {

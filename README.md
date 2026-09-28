@@ -211,25 +211,21 @@ npm test          # asserts the chain shape and ordering
 
 ## Reasoning
 
-`src/mastra/processors/streaming-thinking.ts` shows the model's reasoning **as it
-arrives, then removes it**. One message is posted and edited in place, so the chat does
-not fill with a line per token; when the answer is ready that message is deleted and
-only the answer remains.
+Reasoning is **not** shown. This is a deliberate decision, and the reason is a
+deadlock that made the bot go silent.
 
-This replaced an earlier design that inlined reasoning into the final reply as a quoted
-block. Inlining was wrong here: the reasoning is noise to the person who asked the
-question, and it stays in the transcript forever. Showing it live still gives the signal
-that matters — the agent is working, not stuck — without leaving anything behind.
+Telegram cannot be posted to from inside an agent run. The channel cannot finish
+delivering its own reply until the run completes, and the run cannot complete
+until the post resolves, so an `await thread.post()` inside an output processor
+never settles. Nothing throws and nothing is logged: the webhook returns 200 and
+the bot simply never replies. It was verified on the live bot and reproduced
+locally, and it is why 8572f3f had to be undone.
 
-The processor cannot see the channel thread, so the guarded handler puts it on the
-per-message `requestContext` first (see `THREAD_CONTEXT_KEY`). The alternative —
-reimplementing the channel's stream-and-post loop — would bypass Mastra's signal and
-tool-approval handling on a path that is already fragile (see the streaming notes
-above).
-
-Edits are rate-limited to one every 900ms so Telegram does not throttle the chat;
-`THINKING_EDIT_THROTTLE_MS` overrides that. Every failure path is cosmetic: if Telegram
-refuses a post or an edit, the answer is still delivered.
+Live thinking is not available for this channel. The honest alternative — a
+placeholder posted from the guarded handler before the run and removed after it —
+is safe, because that I/O happens outside the run. It can show that the agent is
+working, but not the reasoning itself, because the guard has no access to the
+model stream.
 
 ## Voice notes (local Whisper)
 

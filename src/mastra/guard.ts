@@ -2,7 +2,6 @@ import type { ChannelHandler, ChannelHandlerContext } from '@mastra/core/channel
 import { isAllowedUser, REJECTION_NOTICE } from './access.ts';
 import { chatHistory, parseChatCommand, recallSession, startNewChat } from './commands.ts';
 import { isVoiceMessage, transcribeVoice } from './voice.ts';
-import { THREAD_CONTEXT_KEY } from './processors/streaming-thinking.ts';
 
 /**
  * Plain text of an incoming message.
@@ -145,11 +144,6 @@ export function createGuardedHandler(
         return;
       }
 
-      // The thinking processor cannot see the channel thread on its own, so put
-      // it on the per-message request context before handing off.
-      if (ctx?.requestContext && typeof ctx.requestContext.set === 'function') {
-        ctx.requestContext.set(THREAD_CONTEXT_KEY, thread);
-      }
 
       await defaultHandler(thread, message);
       return;

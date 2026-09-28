@@ -10,9 +10,44 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { TelegramFormatConverter } from '@chat-adapter/telegram';
 import { ReasoningBlockProcessor } from '../src/mastra/processors/reasoning-block.ts';
-import { FREE_MODEL_CHAIN, resolveModel, assistantModelList } from '../src/mastra/model.ts';
+import {
+  OPENROUTER_FREE_CHAIN,
+  resolveModel,
+  assistantModelList,
+} from '../src/mastra/model.ts';
 
 type AnyRecord = Record<string, unknown>;
+
+/**
+ * A chain entry's model is either a plain string (OpenRouter, resolved by
+ * Mastra's provider router) or a Zen config object carrying its own `id` and
+ * `url`. Normalise to the id so ordering can be asserted.
+ */
+function modelId(entry: { model: unknown }): string {
+  const m = entry.model;
+  if (typeof m === 'string') return m;
+  const id = (m as { id?: unknown }).id;
+  if (typeof id === 'string') return id;
+  throw new Error(`chain entry has no resolvable id: ${JSON.stringify(m)}`);
+}
+
+/** Run with a given env and restore it afterwards, so tests stay independent. */
+function withEnv<T>(vars: Record<string, string | undefined>, fn: () => T): T {
+  const previous: Record<string, string | undefined> = {};
+  for (const [k, v] of Object.entries(vars)) {
+    previous[k] = process.env[k];
+    if (v === undefined) delete process.env[k];
+    else process.env[k] = v;
+  }
+  try {
+    return fn();
+  } finally {
+    for (const [k, v] of Object.entries(previous)) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
+  }
+}
 
 /** Minimal message shape the processor reads. */
 function message(parts: unknown[], content = 'The answer is 42.') {
@@ -76,63 +111,131 @@ test('quotes every reasoning line and separates the block from the answer', () =
   assert.match(out, /^\> \*\*Thinking\*\*\n> line one line two\n\nThe answer is 42\.$/);
 });
 
-test('chain is OpenRouter free-only with immediate failover', () => {
-  const list = assistantModelList();
+test('OpenCode Zen is tried before any OpenRouter model', () => {
+  const list = withEnv({ OPENCODE_API_KEY: 'test-key', MODEL: undefined }, () =>
+    assistantModelList(),
+  );
+  const ids = list.map(modelId);
+
+  const firstNonOpenCode = ids.findIndex((id) => id.startsWith('openrouter/'));
+  const lastOpenCode = ids.map((id) => id.startsWith('opencode/')).lastIndexOf(true);
+
+  assert.ok(lastOpenCode >= 0, 'a Zen model must be present when the key is set');
+  assert.ok(
+    lastOpenCode < firstNonOpenCode,
+    `every Zen entry must precede every OpenRouter entry, got ${ids.join(', ')}`,
+  );
+  assert.equal(ids[0], 'opencode/space-bunny-free');
+});
+
+test('Zen entries carry the Zen base URL, not a provider prefix Mastra would guess', () => {
+  const list = withEnv({ OPENCODE_API_KEY: 'test-key', MODEL: undefined }, () =>
+    assistantModelList(),
+  );
+  const zen = list[0].model as { url: string; id: string; apiKey?: string };
+  assert.equal(zen.url, 'https://opencode.ai/zen/v1');
+  assert.equal(zen.id, 'opencode/space-bunny-free');
+});
+
+test('the chain is free-only with immediate failover everywhere', () => {
+  const list = withEnv({ OPENCODE_API_KEY: 'test-key', MODEL: undefined }, () =>
+    assistantModelList(),
+  );
   assert.ok(list.length > 1);
   for (const entry of list) {
-    assert.match(String(entry.model), /^openrouter\//);
+    const id = modelId(entry);
+    assert.ok(
+      id.startsWith('opencode/') || id.startsWith('openrouter/'),
+      `unexpected model: ${id}`,
+    );
     assert.equal(entry.maxRetries, 0);
   }
 });
 
-test('chain has no duplicates', () => {
-  const ids = assistantModelList().map((e) => String(e.model));
+test('removing the Zen key falls back to OpenRouter-only', () => {
+  const list = withEnv({ OPENCODE_API_KEY: undefined, MODEL: undefined }, () =>
+    assistantModelList(),
+  );
+  assert.equal(list.length, OPENROUTER_FREE_CHAIN.length);
+  assert.ok(list.every((e) => modelId(e).startsWith('openrouter/')));
+});
+
+test('the chain has no duplicates', () => {
+  const list = withEnv({ OPENCODE_API_KEY: 'test-key', MODEL: undefined }, () =>
+    assistantModelList(),
+  );
+  const ids = list.map(modelId);
   assert.equal(new Set(ids).size, ids.length);
 });
 
-test('chain never references a zero-credit paid slug', () => {
-  for (const { model } of FREE_MODEL_CHAIN) {
+test('no paid slug is ever referenced', () => {
+  // The OpenRouter key has no credits, so any paid slug would fail at call time.
+  for (const { model } of OPENROUTER_FREE_CHAIN) {
     assert.ok(!model.includes('deepseek/deepseek-v4-flash-0731'), model);
   }
 });
 
-test('verified tier is ordered by descending context', () => {
-  const contexts = FREE_MODEL_CHAIN.slice(0, 10).map((e) => e.context);
+test('no Zen model known to be client-restricted is in the chain', () => {
+  // These nine answer 403 "can only be used from within OpenCode" from a server.
+  const restricted = [
+    'nemotron-3-ultra-free',
+    'nemotron-3.5-lightning-free',
+    'ling-3.0-flash-fin-free',
+    'mimo-v2.6-flash-free',
+    'mimo-v2.5-free',
+    'jev-1.13-free',
+    'longcat-2.5-preview-free',
+    'muse-spark-1.3-contributor-free',
+    'muse-spark-1.2-contributor-free',
+  ];
+  const list = withEnv({ OPENCODE_API_KEY: 'test-key', MODEL: undefined }, () =>
+    assistantModelList(),
+  );
+  const ids = list.map(modelId);
+  for (const id of restricted) {
+    assert.ok(!ids.includes(`opencode/${id}`), `${id} is 403 from a server`);
+  }
+});
+
+test('verified OpenRouter tier is ordered by descending context', () => {
+  const contexts = OPENROUTER_FREE_CHAIN.slice(0, 10).map((e) => e.context);
   assert.deepEqual(contexts, [...contexts].sort((a, b) => b - a));
 });
 
-test('rate-limited models stay in the chain as a deeper tier', () => {
-  const ids = FREE_MODEL_CHAIN.map((e) => e.model);
+test('rate-limited OpenRouter models stay in the chain as a deeper tier', () => {
+  const ids = OPENROUTER_FREE_CHAIN.map((e) => e.model);
   assert.ok(ids.includes('openrouter/qwen/qwen3.8-27b:free'));
   assert.ok(ids.includes('openrouter/poolside/laguna-xs-2.1:free'));
 });
 
-test('agentic-only and non-chat models are excluded', () => {
-  const ids = FREE_MODEL_CHAIN.map((e) => e.model);
+test('agentic-only and non-chat OpenRouter models are excluded', () => {
+  const ids = OPENROUTER_FREE_CHAIN.map((e) => e.model);
   assert.ok(!ids.some((m) => m.includes('thinkingmachines/inkling')), '403 agentic-only');
   assert.ok(!ids.some((m) => m.includes('lyria')), 'music model');
   assert.ok(!ids.some((m) => m.includes('content-safety')), 'moderation model');
   assert.ok(!ids.some((m) => m.includes('nano-omni-30b-a3b-reasoning')), 'no tool support');
 });
 
-test('MODEL pins a single model and disables the chain', () => {
-  const previous = process.env.MODEL;
-  process.env.MODEL = 'openrouter/liquid/lfm-2.5-2.6b:free';
-  try {
-    const list = assistantModelList();
-    assert.equal(list.length, 1);
-    assert.equal(list[0].model, 'openrouter/liquid/lfm-2.5-2.6b:free');
-  } finally {
-    if (previous === undefined) delete process.env.MODEL;
-    else process.env.MODEL = previous;
-  }
+test('MODEL pins a single model and disables the chain, for either provider', () => {
+  const openrouter = withEnv({ MODEL: 'openrouter/liquid/lfm-2.5-2.6b:free' }, () =>
+    assistantModelList(),
+  );
+  assert.equal(openrouter.length, 1);
+  assert.equal(openrouter[0].model, 'openrouter/liquid/lfm-2.5-2.6b:free');
+
+  const zen = withEnv({ MODEL: 'opencode/space-bunny-free' }, () => assistantModelList());
+  assert.equal(zen.length, 1);
+  assert.equal((zen[0].model as { url: string }).url, 'https://opencode.ai/zen/v1');
 });
 
 test('opencode/<id> maps to a Zen config, others pass through', () => {
   const zen = resolveModel('opencode/space-bunny-free') as { url: string; id: string };
   assert.equal(zen.url, 'https://opencode.ai/zen/v1');
   assert.equal(zen.id, 'opencode/space-bunny-free');
-  assert.equal(resolveModel('openrouter/liquid/lfm-2.5-2.6b:free'), 'openrouter/liquid/lfm-2.5-2.6b:free');
+  assert.equal(
+    resolveModel('openrouter/liquid/lfm-2.5-2.6b:free'),
+    'openrouter/liquid/lfm-2.5-2.6b:free',
+  );
 });
 
 const converter = new TelegramFormatConverter();

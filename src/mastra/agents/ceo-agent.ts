@@ -52,7 +52,7 @@ export const ceoAgent = new Agent({
    * An ordered array of models. Mastra walks it in order and moves to the next
    * entry when the current one errors, so this is the free-model fallback
    * chain: highest context first, down to smaller stand-ins, and on to OpenCode
-   * Zen when OPENCODE_FREE_MODELS=1. A user never sees a model error.
+   * Zen, then the OpenRouter free tier. A user never sees a model error.
    */
   model: assistantModelList(),
   defaultOptions: openRouterReasoningOptions(),

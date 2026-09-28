@@ -5,7 +5,7 @@ a Vercel serverless function. Conversation memory lives in Postgres (Neon). Only
 named Telegram accounts can talk to it.
 
 - **Agent:** `ceo-agent` — *Dastyare Social — CEO Agent*
-- **Model:** any OpenRouter model (default `openrouter/anthropic/claude-sonnet-4.5`)
+- **Model:** free only. OpenCode Zen first, then OpenRouter free models as fallback
 - **Web search:** Tavily, optional
 - **Memory:** per-chat, capped at 20 messages / 8k tokens, stored in Postgres
 - **Access:** allowlisted Telegram user IDs only
@@ -86,7 +86,7 @@ The app logs a warning at boot if you deploy without it.
 | `TELEGRAM_ALLOWED_USER_IDS` | no | defaults to `2063150861,8440954997` |
 | `REDIS_URL` | recommended | prevents duplicate replies |
 | `TAVILY_API_KEY` | optional | <https://app.tavily.com>; enables web search |
-| `OPENCODE_API_KEY` | optional | with `OPENCODE_FREE_MODELS=1`, adds Zen as a safety net |
+| `OPENCODE_API_KEY` | yes | Zen is the primary tier; remove it to run OpenRouter-only |
 | `MODEL` | optional | pins one model and disables the free chain — see Model routing |
 | `TELEGRAM_MODE` | optional | keep `webhook` on Vercel — see below |
 | `MASTRA_STUDIO` | optional | leave off in production — see Security |
@@ -128,11 +128,46 @@ step and pass `disableInit: true`.
 
 ## Model routing
 
-The agent uses **OpenRouter free models only**, ordered by max context, with automatic
-failover down the list. Mastra accepts an array of models and walks it in order, so the
-ordering *is* the priority. The chain lives in `src/mastra/model.ts`.
+Two **free** tiers, tried in this order:
 
-The supplied OpenRouter key has no credits, so any paid slug would fail at call time.
+1. **OpenCode Zen** — attempted first.
+2. **OpenRouter free models** — the fallback tier.
+
+Mastra accepts an array of models and walks it in order, failing over on error, so the
+ordering *is* the priority and the user never sees a model error. The chain lives in
+`src/mastra/model.ts`. Every entry sets `maxRetries: 0` — when a model is already failing,
+retrying it just makes the user wait instead of moving on.
+
+### Tier 1 — OpenCode Zen
+
+Zen publishes 43 models, 10 named as free. All 10 were tested with a real
+chat-completions call carrying a tool definition. **Nine are unusable from a server** —
+they answer `403 OpenCode's free tier can only be used from within OpenCode`:
+
+`nemotron-3-ultra-free`, `nemotron-3.5-lightning-free`, `ling-3.0-flash-fin-free`,
+`mimo-v2.6-flash-free`, `mimo-v2.5-free`, `jev-1.13-free`, `longcat-2.5-preview-free`,
+`muse-spark-1.3-contributor-free`, `muse-spark-1.2-contributor-free`
+
+That is a deliberate access control on the provider's side, and this agent runs on a Vercel
+server rather than inside the OpenCode client. Exactly one Zen free model is reachable:
+
+| Model | Verified |
+| --- | --- |
+| `opencode/space-bunny-free` | 200 + tools |
+
+So "OpenCode first" resolves to a single model. If Zen ever widens server access, add the
+new ids to `OPENCODE_MODELS` — the ordering and failover already work. Removing
+`OPENCODE_API_KEY` gives a valid OpenRouter-only configuration.
+
+Zen does not publish context lengths: its `/models` endpoint returns only `id`, `object`,
+`created`, and `owned_by`, and they could not be verified without probing the limit with
+oversized requests. No number is asserted rather than a guess going into a comment. It is
+not the binding constraint anyway — the agent caps history at 8k tokens.
+
+### Tier 2 — OpenRouter free
+
+Free models only, ordered by max context, because the supplied OpenRouter key has no
+credits and any paid slug would fail at call time.
 The chain therefore contains only models that returned a real response — each was
 verified with a live chat-completions call carrying a tool definition, checking both
 that it returns 200 and that it actually emits `tool_calls`:
@@ -165,9 +200,7 @@ Every entry sets `maxRetries: 0` — when a model is already failing, retrying i
 user's wait instead of moving on to the next free model.
 
 Set `MODEL` to pin one model and disable the chain, for A/B testing or to reproduce a bad
-reply. `OPENCODE_FREE_MODELS=1` appends OpenCode Zen to the end as a cross-provider safety
-net; most Zen "free" models reject non-OpenCode clients, so only ones verified to run are
-listed.
+reply. It accepts a Zen id or an OpenRouter id.
 
 Re-verify the chain before trusting it, since free-tier availability changes:
 
@@ -243,6 +276,6 @@ than bolt on something that quietly degrades memory search.
 | Replies are the wrong model | Check `src/mastra/model.ts` for the chain, and `MODEL` if it is set — it pins a single model and disables failover. `openrouter/…` needs `OPENROUTER_API_KEY`. |
 | Agent claims it cannot search | `TAVILY_API_KEY` is unset. Tools are only attached when it exists. |
 | `Bad Request: chat not found` | The bot cannot open a conversation. Telegram only lets a bot message a user who has already started it, so an allowed user must send `/start` first. This is also why the model chain and reasoning block are verified locally rather than by sending a test message. |
-| Every model in the chain 429s | OpenRouter free-tier rate limit, per account and per model. The chain fails over; if the whole pool is exhausted the request fails until capacity returns. `OPENCODE_FREE_MODELS=1` adds a cross-provider safety net. |
+| Every model in the chain 429s | OpenRouter free-tier rate limit, per account and per model. The chain fails over; if Zen and the whole OpenRouter pool are exhausted the request fails until capacity returns. |
 | Database connection errors on deploy | Confirm the Neon host allows your Vercel region and that `sslmode=verify-full` passes; if Neon presents a chain `pg` rejects, fall back to `sslmode=require` (the app will rewrite it again, so check the log). |
 | Nothing happens locally | Expected. `webhook` mode needs a public URL — use a tunnel, or set `TELEGRAM_MODE=polling`. |

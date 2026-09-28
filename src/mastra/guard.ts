@@ -1,5 +1,34 @@
 import type { ChannelHandler, ChannelHandlerContext } from '@mastra/core/channels';
 import { isAllowedUser, REJECTION_NOTICE } from './access.ts';
+import { chatHistory, parseChatCommand, startNewChat } from './commands.ts';
+
+/**
+ * Plain text of an incoming message, or '' when it carries no text part.
+ */
+/**
+ * Memory resource for a channel thread.
+ *
+ * The Telegram adapter encodes a DM thread as `telegram:<chatId>`, which is also the
+ * memory resourceId Mastra assigns to that chat, so the platform thread id is the
+ * resource. Verified against the store: a DM for user 8440954997 lands under
+ * resourceId `telegram:8440954997`, and that is the platform thread id too.
+ */
+function memoryResourceId(thread: { id: string }): string {
+  return thread.id;
+}
+
+function messageText(message: unknown): string {
+  const parts = (message as { content?: { parts?: unknown } })?.content?.parts;
+  if (!Array.isArray(parts)) return '';
+  let out = '';
+  for (const part of parts) {
+    if (part && typeof part === 'object' && (part as { type?: string }).type === 'text') {
+      const text = (part as { text?: unknown }).text;
+      if (typeof text === 'string') out += text;
+    }
+  }
+  return out;
+}
 
 /**
  * Records a blocked message.
@@ -44,6 +73,30 @@ export function createGuardedHandler(
     const userId = message.author?.userId;
 
     if (isAllowedUser(userId)) {
+      /**
+       * Lifecycle commands are handled here rather than sent to the model, so
+       * `/new` cannot be answered with prose while the thread stays full, and so
+       * the command itself never becomes part of the conversation history.
+       */
+      const command = parseChatCommand(messageText(message));
+      if (command) {
+        try {
+          const result =
+            command === 'new'
+              ? await startNewChat(memoryResourceId(thread))
+              : await chatHistory(memoryResourceId(thread));
+          await thread.post(result.reply);
+        } catch (error) {
+          const logger = ctx?.mastra?.getLogger?.();
+          const detail = String((error as Error)?.message ?? error);
+          const line = `[commands] /${command} failed: ${detail}`;
+          if (logger) logger.error(line);
+          else console.error(line);
+          await thread.post(`Could not run /${command}. Try again in a moment.`);
+        }
+        return;
+      }
+
       await defaultHandler(thread, message);
       return;
     }

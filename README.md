@@ -227,6 +227,38 @@ reachable through this adapter, verified against the adapter's own converter
   and renders as literal characters. An output processor can only emit text, so it
   cannot construct that node.
 
+## Chat history and commands
+
+The agent remembers. Each Telegram chat maps to one Mastra thread, and the agent
+reads back up to **20 messages or 8k tokens**, whichever comes first — so it
+follows a long conversation and forgets the oldest turns rather than blowing the
+context window.
+
+Because history is continuous, there are commands to manage it. They are handled
+before the model runs, so a command can never be answered with prose or leak into
+the conversation:
+
+| Command | Effect |
+| --- | --- |
+| `/new` | Archives the current conversation, clears the chat, starts fresh. |
+| `/clear` | Alias of `/new`. |
+| `/history` | Lists archived sessions with message counts and timestamps. |
+
+`/new` **archives rather than discards**. The live thread is copied to a
+`…:archive` thread in the same Postgres database and then deleted, so the old
+conversation is still on disk and the next message starts in a genuinely empty
+thread. Confirmations are immediate — archiving three messages replies
+*"Started a new chat. The previous conversation (3 messages) is archived."*
+
+Mastra does expose `resolveThreadId` for choosing a thread id, but it only runs
+when a thread is first created and the platform-to-memory mapping is persisted
+afterwards, so it cannot re-point an existing chat. Archive-and-delete is the
+route that works through the documented storage API.
+
+Archived sessions are not browsable in Telegram — `/history` reports what exists.
+If you want to actually read one back, it is a thread under
+`<resourceId>:archive` in `mastra_threads`.
+
 ## Security notes
 
 - **Rotate your bot token.** `.env` is gitignored, but if the token was ever pasted

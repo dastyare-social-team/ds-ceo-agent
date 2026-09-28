@@ -84,7 +84,8 @@ The app logs a warning at boot if you deploy without it.
 | `TELEGRAM_WEBHOOK_SECRET_TOKEN` | yes | **must match** the value given to `set-webhook` |
 | `DATABASE_URL` | yes | Postgres, remote, `sslmode=verify-full` |
 | `TELEGRAM_ALLOWED_USER_IDS` | no | defaults to `2063150861,8440954997` |
-| `REDIS_URL` | recommended | prevents duplicate replies |
+| `REDIS_URL` | optional | connection string for shared pub/sub |
+| `REDIS_PUBSUB` | optional | keep `0` — enabling it deadlocks streaming, see below |
 | `TAVILY_API_KEY` | optional | <https://app.tavily.com>; enables web search |
 | `OPENCODE_API_KEY` | yes | Zen is the primary tier; remove it to run OpenRouter-only |
 | `MODEL` | optional | pins one model and disables the free chain — see Model routing |
@@ -270,6 +271,7 @@ than bolt on something that quietly degrades memory search.
 | --- | --- |
 | Bot replies `401 Invalid secret token` | `TELEGRAM_WEBHOOK_SECRET_TOKEN` differs between Vercel and the value given to `set-webhook`. |
 | Bot ignores messages, and `getWebhookInfo` shows `pending_update_count` climbing | The webhook URL is not registered, so Telegram has nowhere to deliver. Run `npm run webhook -- https://your-app.vercel.app`. |
+| Bot receives messages but never replies, and nothing lands in Postgres | Shared pub/sub is on. `RedisStreamsPubSub` deadlocks `agent.stream()` on `@mastra/core` 1.71.0, and the Telegram channel streams, so every run hangs after the webhook already returned 200 — Telegram sees success and never retries. Set `REDIS_PUBSUB=0`. |
 | `getWebhookInfo` shows `Wrong response from the webhook: 503` and messages never arrive | A cold-started function served the webhook before the Chat SDK finished initialising. Mastra's route only guards when `initPromise` already exists, so the request was rejected and Telegram held the update. `src/mastra/index.ts` now initialises the channel at module load to close that window. If it persists, check the function's max duration — initialisation needs a few seconds on a cold start. |
 | Bot replies `503 Service unavailable` | The adapter could not reach Telegram or its state store. Check deploy logs and confirm `DATABASE_URL` is remote. |
 | Nobody gets a reply, no errors | A stranger was blocked. Look for `[access] Blocked` in the logs. |

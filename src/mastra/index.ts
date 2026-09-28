@@ -9,24 +9,45 @@ const AGENT_ID = 'ceo-agent';
 
 const redisUrl = env('REDIS_URL');
 
-// Vercel routes each request to a different instance, so without shared
-// pub/sub two instances can both pick up the same Telegram update and reply
-// twice. Redis fixes that; it is optional locally.
-if (process.env.VERCEL && !redisUrl) {
+/**
+ * Shared pub/sub, OFF by default.
+ *
+ * It exists so two Vercel instances cannot both handle the same Telegram update
+ * and reply twice. But on @mastra/core 1.71.0 (the latest release) enabling it
+ * deadlocks the streaming path, and the Telegram channel streams:
+ *
+ *   - Mastra with `pubsub: new RedisStreamsPubSub(...)`  -> agent.stream() never
+ *     resolves, before any chunk.
+ *   - Mastra without pubsub                              -> agent.stream()
+ *     resolves in ~14s and streams normally.
+ *
+ * `agent.generate()` is unaffected, which is why this hid for so long: it was
+ * the one path that still worked. With pubsub on, the webhook returned 200
+ * immediately, the run then hung, Telegram saw a successful delivery, never
+ * retried, and the bot simply never replied.
+ *
+ * A live bot that answers once is worth more than one that risks a duplicate
+ * reply, so this is opt-in via REDIS_PUBSUB=1. Remove the risk of duplicates by
+ * other means — for example a single Vercel instance, or a queue — and re-enable
+ * it once the deadlock is fixed upstream.
+ */
+const pubsubEnabled = process.env.REDIS_PUBSUB === '1' && Boolean(redisUrl);
+
+if (process.env.VERCEL && redisUrl && !pubsubEnabled) {
   console.warn(
-    '[mastra] REDIS_URL is not set. Concurrent messages in the same chat may ' +
-      'be handled twice on Vercel. Add a Redis instance (Vercel Marketplace or ' +
-      'Upstash) to fix this.',
+    '[mastra] REDIS_URL is set but REDIS_PUBSUB is not, so shared pub/sub is OFF. ' +
+      'Concurrent messages in the same chat may be handled twice on Vercel. ' +
+      'Enabling it deadlocks streaming on @mastra/core 1.71.0 — see src/mastra/index.ts.',
   );
 }
 
 export const mastra = new Mastra({
   agents: { [AGENT_ID]: ceoAgent },
   storage,
-  ...(redisUrl
+  ...(pubsubEnabled
     ? {
         pubsub: new RedisStreamsPubSub({
-          url: redisUrl,
+          url: redisUrl as string,
           keyPrefix: 'mastra:ds-ceo-agent',
         }),
       }

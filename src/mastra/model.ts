@@ -135,25 +135,60 @@ type ChainEntry = { model: string | ReturnType<typeof opencodeModel>; maxRetries
  * slot on a guaranteed 401. Remove the key to fall back to OpenRouter-only, or
  * set `MODEL` to pin a single model and disable the chain entirely.
  */
-export function assistantModelList(): ChainEntry[] {
+/**
+ * The agent's model: a single model, not Mastra's model array.
+ *
+ * Priority is still OpenCode Zen first, then OpenRouter free models, but the
+ * array form currently deadlocks the streaming path. Reproduced on
+ * @mastra/core 1.71.0, the latest release:
+ *
+ *   - `agent.stream(...)` with a model ARRAY never resolves. Not slow, not
+ *     retrying: `await a.stream()` itself hangs indefinitely before a single
+ *     chunk, with any entry in the array, with or without output processors, and
+ *     with both a Zen and a native OpenRouter entry.
+ *   - `agent.stream(...)` with a single model STRING resolves in ~7s and
+ *     streams normally.
+ *   - `agent.generate(...)` works with BOTH shapes. Only streaming breaks.
+ *
+ * The Telegram channel streams, so the array form made every inbound message
+ * hang — and because the handler had already returned 200, Telegram saw a
+ * successful delivery, never retried, and the bot just never replied. That is
+ * why the failure looked like "no response" rather than an error.
+ *
+ * So the default is one model. `OPENCODE_FALLBACK_CHAIN=1` re-enables the array
+ * (the correct shape for `generate`) and is documented as unsafe for the
+ * Telegram channel until the deadlock is fixed upstream.
+ */
+export function assistantModel(): string | ReturnType<typeof opencodeModel> {
   const pinned = process.env.MODEL;
-  if (pinned) {
-    return [{ model: resolveModel(pinned), maxRetries: 0 }];
-  }
+  if (pinned) return resolveModel(pinned);
+  return opencodeModel(OPENCODE_MODELS[0]);
+}
+
+/**
+ * The full ordered chain: OpenCode Zen first, then the OpenRouter free tier.
+ * Safe for `generate`; NOT safe for streaming on @mastra/core 1.71.0.
+ *
+ * Zen is included only when `OPENCODE_API_KEY` is set — without a key the calls
+ * cannot authenticate, so listing them would waste a failover slot on a
+ * guaranteed 401. Removing the key yields a valid OpenRouter-only chain.
+ */
+export function assistantModelChain(): ChainEntry[] {
+  const pinned = process.env.MODEL;
+  if (pinned) return [{ model: resolveModel(pinned), maxRetries: 0 }];
 
   const list: ChainEntry[] = [];
-
   if (process.env.OPENCODE_API_KEY) {
-    for (const id of OPENCODE_MODELS) {
-      list.push({ model: opencodeModel(id), maxRetries: 0 });
-    }
+    for (const id of OPENCODE_MODELS) list.push({ model: opencodeModel(id), maxRetries: 0 });
   }
-
-  for (const entry of OPENROUTER_FREE_CHAIN) {
-    list.push({ model: entry.model, maxRetries: 0 });
-  }
-
+  for (const entry of OPENROUTER_FREE_CHAIN) list.push({ model: entry.model, maxRetries: 0 });
   return list;
+}
+
+/** Single model by default; the array only when explicitly opted back in. */
+export function assistantModelList(): ChainEntry[] {
+  if (process.env.OPENCODE_FALLBACK_CHAIN === '1') return assistantModelChain();
+  return [{ model: assistantModel(), maxRetries: 0 }];
 }
 
 /**

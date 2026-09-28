@@ -6,7 +6,7 @@ import { createTavilySearchTool, createTavilyExtractTool } from '@mastra/tavily'
 import { waitUntil } from '@vercel/functions';
 import { env } from '../env.ts';
 import { createGuardedHandler } from '../guard.ts';
-import { assistantModelList, openRouterReasoningOptions } from '../model.ts';
+import { assistantModel, openRouterReasoningOptions } from '../model.ts';
 import { ReasoningBlockProcessor } from '../processors/reasoning-block.ts';
 
 /**
@@ -54,7 +54,7 @@ export const ceoAgent = new Agent({
    * chain: highest context first, down to smaller stand-ins, and on to OpenCode
    * Zen, then the OpenRouter free tier. A user never sees a model error.
    */
-  model: assistantModelList(),
+  model: assistantModel(),
   defaultOptions: openRouterReasoningOptions(),
   instructions: `${instructions}\n\n${TOOLING}`,
   memory: new Memory({

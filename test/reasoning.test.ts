@@ -8,12 +8,14 @@
  */
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
+import { readFileSync } from 'node:fs';
 import { TelegramFormatConverter } from '@chat-adapter/telegram';
 import { ReasoningBlockProcessor } from '../src/mastra/processors/reasoning-block.ts';
 import {
   OPENROUTER_FREE_CHAIN,
   resolveModel,
-  assistantModelList,
+  assistantModel,
+  assistantModelChain,
 } from '../src/mastra/model.ts';
 
 type AnyRecord = Record<string, unknown>;
@@ -111,35 +113,34 @@ test('quotes every reasoning line and separates the block from the answer', () =
   assert.match(out, /^\> \*\*Thinking\*\*\n> line one line two\n\nThe answer is 42\.$/);
 });
 
-test('OpenCode Zen is tried before any OpenRouter model', () => {
-  const list = withEnv({ OPENCODE_API_KEY: 'test-key', MODEL: undefined }, () =>
-    assistantModelList(),
+test('the agent ships a SINGLE model, because an array deadlocks streaming', () => {
+  // Mastra's channel streams. With a model array, agent.stream() never resolves
+  // on @mastra/core 1.71.0 and every inbound message hangs silently.
+  const model = withEnv({ OPENCODE_API_KEY: 'test-key', MODEL: undefined }, () =>
+    assistantModel(),
+  );
+  assert.equal(typeof model, 'object', 'a single Zen config object, not an array');
+  assert.equal((model as { id: string }).id, 'opencode/space-bunny-free');
+  assert.equal((model as { url: string }).url, 'https://opencode.ai/zen/v1');
+});
+
+test('OpenCode Zen is first in the chain, ahead of every OpenRouter model', () => {
+  const list = withEnv(
+    { OPENCODE_API_KEY: 'test-key', MODEL: undefined, OPENCODE_FALLBACK_CHAIN: '1' },
+    () => assistantModelChain(),
   );
   const ids = list.map(modelId);
-
-  const firstNonOpenCode = ids.findIndex((id) => id.startsWith('openrouter/'));
-  const lastOpenCode = ids.map((id) => id.startsWith('opencode/')).lastIndexOf(true);
-
-  assert.ok(lastOpenCode >= 0, 'a Zen model must be present when the key is set');
-  assert.ok(
-    lastOpenCode < firstNonOpenCode,
-    `every Zen entry must precede every OpenRouter entry, got ${ids.join(', ')}`,
-  );
+  const lastZen = ids.map((id) => id.startsWith('opencode/')).lastIndexOf(true);
+  const firstOpenRouter = ids.findIndex((id) => id.startsWith('openrouter/'));
+  assert.ok(lastZen >= 0, 'a Zen model must be present when the key is set');
+  assert.ok(lastZen < firstOpenRouter, `Zen must precede OpenRouter: ${ids.join(', ')}`);
   assert.equal(ids[0], 'opencode/space-bunny-free');
 });
 
-test('Zen entries carry the Zen base URL, not a provider prefix Mastra would guess', () => {
-  const list = withEnv({ OPENCODE_API_KEY: 'test-key', MODEL: undefined }, () =>
-    assistantModelList(),
-  );
-  const zen = list[0].model as { url: string; id: string; apiKey?: string };
-  assert.equal(zen.url, 'https://opencode.ai/zen/v1');
-  assert.equal(zen.id, 'opencode/space-bunny-free');
-});
-
-test('the chain is free-only with immediate failover everywhere', () => {
-  const list = withEnv({ OPENCODE_API_KEY: 'test-key', MODEL: undefined }, () =>
-    assistantModelList(),
+test('every chain entry is free-tier and fails over without retrying', () => {
+  const list = withEnv(
+    { OPENCODE_API_KEY: 'test-key', MODEL: undefined, OPENCODE_FALLBACK_CHAIN: '1' },
+    () => assistantModelChain(),
   );
   assert.ok(list.length > 1);
   for (const entry of list) {
@@ -152,17 +153,19 @@ test('the chain is free-only with immediate failover everywhere', () => {
   }
 });
 
-test('removing the Zen key falls back to OpenRouter-only', () => {
-  const list = withEnv({ OPENCODE_API_KEY: undefined, MODEL: undefined }, () =>
-    assistantModelList(),
+test('removing the Zen key yields an OpenRouter-only chain', () => {
+  const list = withEnv(
+    { OPENCODE_API_KEY: undefined, MODEL: undefined, OPENCODE_FALLBACK_CHAIN: '1' },
+    () => assistantModelChain(),
   );
   assert.equal(list.length, OPENROUTER_FREE_CHAIN.length);
   assert.ok(list.every((e) => modelId(e).startsWith('openrouter/')));
 });
 
 test('the chain has no duplicates', () => {
-  const list = withEnv({ OPENCODE_API_KEY: 'test-key', MODEL: undefined }, () =>
-    assistantModelList(),
+  const list = withEnv(
+    { OPENCODE_API_KEY: 'test-key', MODEL: undefined, OPENCODE_FALLBACK_CHAIN: '1' },
+    () => assistantModelChain(),
   );
   const ids = list.map(modelId);
   assert.equal(new Set(ids).size, ids.length);
@@ -188,10 +191,10 @@ test('no Zen model known to be client-restricted is in the chain', () => {
     'muse-spark-1.3-contributor-free',
     'muse-spark-1.2-contributor-free',
   ];
-  const list = withEnv({ OPENCODE_API_KEY: 'test-key', MODEL: undefined }, () =>
-    assistantModelList(),
-  );
-  const ids = list.map(modelId);
+  const ids = withEnv(
+    { OPENCODE_API_KEY: 'test-key', MODEL: undefined, OPENCODE_FALLBACK_CHAIN: '1' },
+    () => assistantModelChain(),
+  ).map(modelId);
   for (const id of restricted) {
     assert.ok(!ids.includes(`opencode/${id}`), `${id} is 403 from a server`);
   }
@@ -216,16 +219,25 @@ test('agentic-only and non-chat OpenRouter models are excluded', () => {
   assert.ok(!ids.some((m) => m.includes('nano-omni-30b-a3b-reasoning')), 'no tool support');
 });
 
-test('MODEL pins a single model and disables the chain, for either provider', () => {
+test('MODEL pins a single model for either provider', () => {
   const openrouter = withEnv({ MODEL: 'openrouter/liquid/lfm-2.5-2.6b:free' }, () =>
-    assistantModelList(),
+    assistantModel(),
   );
-  assert.equal(openrouter.length, 1);
-  assert.equal(openrouter[0].model, 'openrouter/liquid/lfm-2.5-2.6b:free');
+  assert.equal(openrouter, 'openrouter/liquid/lfm-2.5-2.6b:free');
 
-  const zen = withEnv({ MODEL: 'opencode/space-bunny-free' }, () => assistantModelList());
-  assert.equal(zen.length, 1);
-  assert.equal((zen[0].model as { url: string }).url, 'https://opencode.ai/zen/v1');
+  const zen = withEnv({ MODEL: 'opencode/space-bunny-free' }, () => assistantModel());
+  assert.equal((zen as { url: string }).url, 'https://opencode.ai/zen/v1');
+});
+
+test('shared pub/sub is off unless REDIS_PUBSUB=1', () => {
+  // RedisStreamsPubSub deadlocks agent.stream() on @mastra/core 1.71.0, and the
+  // Telegram channel streams, so a live bot that answers beats dedup.
+  const src = readFileSync('src/mastra/index.ts', 'utf8');
+  assert.ok(
+    src.includes("process.env.REDIS_PUBSUB === '1'"),
+    'pubsub must be gated behind REDIS_PUBSUB',
+  );
+  assert.ok(src.includes('deadlocks streaming'), 'the deadlock must be documented in the source');
 });
 
 test('opencode/<id> maps to a Zen config, others pass through', () => {

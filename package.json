@@ -7,13 +7,14 @@
   "scripts": {
     "dev": "mastra dev",
     "build": "mastra build",
-    "start": "mastra start",
+    "build:vercel": "npm run build && npm run slim:bundle && npm run check:bundle",
+    "slim:bundle": "node scripts/slim-bundle.mjs",
+    "check:bundle": "node scripts/check-bundle-size.mjs",
     "typecheck": "tsc --noEmit",
+    "test": "node --env-file=.env --test test/*.test.ts",
     "webhook": "node scripts/set-webhook.mjs",
     "webhook:remove": "node scripts/set-webhook.mjs --remove",
-    "test": "node --env-file=.env --test test/*.test.ts",
-    "check:bundle": "node scripts/check-bundle-size.mjs",
-    "slim:bundle": "node scripts/slim-bundle.mjs"
+    "start": "mastra start"
   },
   "dependencies": {
     "@chat-adapter/telegram": "latest",

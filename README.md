@@ -292,9 +292,9 @@ function never reads: 1130 sourcemaps (60MB) and 1053 type declarations (21MB)
 that ship because the deployer copies whole packages. Vercel's limit is 250MB, so
 there is room, but the headroom is better spent elsewhere.
 
-    npm run build && npm run slim:bundle
+    npm run build:vercel
 
-That brings it to **118MB**. It removes only `.map` and `.d.ts` sidecars.
+`npm run build:vercel` chains all three steps (build, slim, check) so the trim cannot be forgotten after a rebuild. It brings the function to **118MB**. It removes only `.map` and `.d.ts` sidecars.
 
 The TypeScript compiler (24MB) is deliberately **not** removed. It reaches the
 output through `typescript-paths`, which the deployer uses at build time to

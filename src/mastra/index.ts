@@ -2,7 +2,6 @@ import { Mastra } from '@mastra/core';
 import { VercelDeployer } from '@mastra/deployer-vercel';
 import { RedisStreamsPubSub } from '@mastra/redis-streams';
 import { ceoAgent } from './agents/ceo-agent.ts';
-import { warmVoiceModel } from './voice.ts';
 import { storage } from './db.ts';
 import { env } from './env.ts';
 
@@ -98,8 +97,3 @@ if (channels) {
     );
   }
 }
-
-// Download the local Whisper weights alongside the channel so the first voice note
-// is answered promptly rather than waiting on a model fetch. Failures are logged and
-// retried on demand: a cold Hugging Face must not stop the bot answering text.
-await warmVoiceModel();

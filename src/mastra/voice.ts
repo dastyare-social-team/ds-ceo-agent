@@ -1,5 +1,14 @@
-import { pipeline } from '@huggingface/transformers';
-import { OggOpusDecoder } from 'ogg-opus-decoder';
+/**
+ * The ASR stack is loaded with dynamic import on purpose.
+ *
+ * A static import here would put onnxruntime and transformers in the module graph
+ * of the agent itself, so every cold start pays for loading the native binding
+ * before the webhook can answer anything. Worse, prefetching the model weights
+ * at boot turned that startup into a network download, and when it stalled the
+ * module never finished evaluating and the bot returned nothing at all.
+ *
+ * Voice is optional, so its cost is now paid only when a voice note arrives.
+ */
 
 /**
  * Voice notes, transcribed locally.
@@ -50,23 +59,13 @@ function asr(): Promise<AsrPipeline> {
   if (!modelPromise) {
     const model = process.env.WHISPER_MODEL ?? DEFAULT_MODEL;
     const dtype = (process.env.WHISPER_DTYPE ?? DEFAULT_DTYPE) as never;
-    modelPromise = pipeline('automatic-speech-recognition', model, { dtype }).then(
-      (p) => p as unknown as AsrPipeline,
+    modelPromise = import('@huggingface/transformers').then(({ pipeline }) =>
+      pipeline('automatic-speech-recognition', model, { dtype }).then((p) => p as unknown as AsrPipeline),
     );
   }
   return modelPromise;
 }
 
-/** Pre-download the model at boot so the first voice note is not slow. */
-export async function warmVoiceModel(): Promise<void> {
-  try {
-    await asr();
-  } catch (error) {
-    // A failed warm-up must not take the whole server down; the next voice note
-    // will retry and surface the real error to the user.
-    console.error(`[voice] model warm-up failed: ${String((error as Error)?.message ?? error)}`);
-  }
-}
 
 type AudioAttachment = { type?: string; fetchData?: () => Promise<unknown> };
 
@@ -95,6 +94,7 @@ async function audioBytes(message: unknown): Promise<Uint8Array> {
 /** OGG/Opus bytes to mono 16-bit-normalised float samples. */
 async function decodeOpus(bytes: Uint8Array): Promise<{ audio: Float32Array; seconds: number }> {
   // The published types say this is sync, but decode() is async at runtime.
+  const { OggOpusDecoder } = await import('ogg-opus-decoder');
   const pcm = (await (new OggOpusDecoder().decode(bytes) as unknown as Promise<{
     channelData: Float32Array[] | Float32Array;
     samplesDecoded: number;

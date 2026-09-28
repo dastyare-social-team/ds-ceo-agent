@@ -209,23 +209,21 @@ Re-verify the chain before trusting it, since free-tier availability changes:
 npm test          # asserts the chain shape and ordering
 ```
 
-## Reasoning
+## Progress, timing, and errors
 
-Reasoning is **not** shown. This is a deliberate decision, and the reason is a
-deadlock that made the bot go silent.
+While the agent is working the chat shows `🧠 Thinking… 5s`, updated every five
+seconds with the elapsed time, and the message is deleted once the answer is
+sent. If the run fails, the same message is rewritten to the error and left in
+place, so a failure is visible rather than looking like the agent ignored the
+message. Errors are trimmed to 300 characters and masked — provider errors
+sometimes echo an API key or a connection string, and this lands in a chat.
 
-Telegram cannot be posted to from inside an agent run. The channel cannot finish
-delivering its own reply until the run completes, and the run cannot complete
-until the post resolves, so an `await thread.post()` inside an output processor
-never settles. Nothing throws and nothing is logged: the webhook returns 200 and
-the bot simply never replies. It was verified on the live bot and reproduced
-locally, and it is why 8572f3f had to be undone.
-
-Live thinking is not available for this channel. The honest alternative — a
-placeholder posted from the guarded handler before the run and removed after it —
-is safe, because that I/O happens outside the run. It can show that the agent is
-working, but not the reasoning itself, because the guard has no access to the
-model stream.
+All of that is deliberately in the guarded handler, not in an output processor.
+Telegram cannot be posted to from inside an agent run: the channel cannot deliver
+its own reply until the run completes, and the run cannot complete until the post
+resolves, so awaiting a send inside a processor deadlocks. There is no error and
+nothing in the logs; the webhook returns 200 and the bot goes silent. From the
+handler, outside the run, the same I/O is safe.
 
 ## Voice notes (local Whisper)
 

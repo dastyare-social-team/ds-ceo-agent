@@ -331,5 +331,7 @@ test('an ordinary message still reaches the model', async () => {
     {} as never,
   );
   assert.equal(defaultHandlerRan, true, 'normal text must go to the agent');
-  assert.equal(posted.length, 0);
+  // The only post is the transient progress placeholder, not a reply or notice.
+  assert.equal(posted.length, 1);
+  assert.match(posted[0], /Thinking/);
 });

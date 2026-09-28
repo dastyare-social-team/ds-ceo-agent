@@ -34,13 +34,15 @@ test('allowlist accepts exactly the two configured accounts', () => {
   assert.equal(isAllowedUser(null), false);
 });
 
-test('direct messages: allowed users reach the agent silently', async () => {
+test('direct messages: allowed users reach the agent and see progress', async () => {
   const handler = createGuardedHandler('direct message');
   for (const id of ALLOWED) {
     const h = harness();
     await handler(h.thread, message(id), h.defaultHandler, h.ctx);
     assert.equal(h.calls.agentRuns, 1, `${id} should reach the agent`);
-    assert.equal(h.calls.posts.length, 0, `${id} should not see a rejection notice`);
+    // One message, the transient Thinking placeholder, and no rejection notice.
+    assert.equal(h.calls.posts.length, 1, `${id} should see the progress placeholder only`);
+    assert.doesNotMatch(h.calls.posts[0], /not allowed|rejection/i);
   }
 });
 

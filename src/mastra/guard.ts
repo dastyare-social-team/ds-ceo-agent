@@ -1,6 +1,7 @@
 import type { ChannelHandler, ChannelHandlerContext } from '@mastra/core/channels';
 import { isAllowedUser, REJECTION_NOTICE } from './access.ts';
 import { chatHistory, parseChatCommand, recallSession, startNewChat } from './commands.ts';
+import type { SentMessageLike } from './processors/progress-types.ts';
 import { isVoiceMessage, transcribeVoice } from './voice.ts';
 
 /**
@@ -80,6 +81,30 @@ export interface GuardOptions {
  * Extracted from the agent config so it can be tested directly, without
  * depending on Telegram transport mode or a live webhook.
  */
+const THINKING_LABEL = '\u{1F9E0} Thinking';
+const THINKING_TICK_MS = 5_000;
+
+/**
+ * Telegram messages are 4096 characters and a wall of text is worse than none, so
+ * the reason is trimmed. Secrets are the other risk: provider errors sometimes
+ * echo a key or a connection string back, so those are masked before it reaches
+ * a chat that more than the two of us can read.
+ */
+function errorDetail(error: unknown): string {
+  const raw =
+    error instanceof Error
+      ? error.message
+      : typeof error === 'string'
+        ? error
+        : JSON.stringify(error);
+  const redacted = raw
+    .replace(/sk-[A-Za-z0-9_-]{8,}/g, 'sk-***')
+    .replace(/Bearer\s+[A-Za-z0-9._-]{8,}/gi, 'Bearer ***')
+    .replace(/(postgres(?:ql)?|rediss?):\/\/[^\s@]+@/gi, '$1://***@');
+  const single = redacted.replace(/\s+/g, ' ').trim() || 'unknown error';
+  return single.length > 300 ? `${single.slice(0, 300)}\u2026` : single;
+}
+
 export function createGuardedHandler(
   kind: string,
   options: GuardOptions = {},
@@ -145,7 +170,49 @@ export function createGuardedHandler(
       }
 
 
-      await defaultHandler(thread, message);
+      /**
+       * Progress is shown from here, in the handler, rather than from an output
+       * processor inside the run. That placement is the whole point: posting to
+       * Telegram while the agent is running deadlocks, because the channel cannot
+       * deliver its own reply until the run finishes and the run cannot finish
+       * until the post resolves. From out here the same I/O is safe, and the run
+       * is still in progress for the timer to report against.
+       */
+      const started = Date.now();
+      const status = await thread.post(`${THINKING_LABEL}\\u2026`);
+      const tick = setInterval(() => {
+        const seconds = Math.round((Date.now() - started) / 1000);
+        // Not awaited: this fires on a timer while the run owns the channel.
+        void status.edit?.(`${THINKING_LABEL}\\u2026 ${seconds}s`).catch(() => undefined);
+      }, THINKING_TICK_MS);
+
+      let failed: unknown;
+      try {
+        await defaultHandler(thread, message);
+      } catch (error) {
+        failed = error;
+      } finally {
+        clearInterval(tick);
+      }
+
+      if (failed !== undefined) {
+        // Leave the message up, rewritten as the error, so the failure is
+        // visible rather than looking like the agent ignored the request.
+        const detail = errorDetail(failed);
+        ctx?.mastra?.getLogger?.().error(`[agent] run failed: ${detail}`);
+        try {
+          await status.edit?.(`\\u274c ${detail}`);
+        } catch {
+          await thread.post(`\\u274c ${detail}`).catch(() => undefined);
+        }
+        return;
+      }
+
+      try {
+        await status?.delete?.();
+      } catch {
+        // The channel may refuse or the message may already be gone.
+      }
       return;
     }
 

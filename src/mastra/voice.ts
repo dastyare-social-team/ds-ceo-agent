@@ -1,14 +1,8 @@
+import { existsSync, mkdirSync } from 'node:fs';
+import { join } from 'node:path';
+
 /**
- * The ASR stack is loaded with dynamic import on purpose.
- *
- * A static import here would put onnxruntime and transformers in the module graph
- * of the agent itself, so every cold start pays for loading the native binding
- * before the webhook can answer anything. Worse, prefetching the model weights
- * at boot turned that startup into a network download, and when it stalled the
- * module never finished evaluating and the bot returned nothing at all.
- *
- * Voice is optional, so its cost is now paid only when a voice note arrives.
- */
+ * Voice notes, transcribed locally.
 
 /**
  * Voice notes, transcribed locally.
@@ -55,13 +49,43 @@ type AsrPipeline = (
  */
 let modelPromise: Promise<AsrPipeline> | undefined;
 
+/**
+ * transformers.js caches downloaded weights next to its own module by default,
+ * i.e. node_modules/@huggingface/transformers/.cache. On Vercel that resolves to
+ * /var/task/node_modules/... which is read-only, so the first voice note failed
+ * with ENOENT on mkdir. Point the cache somewhere writable instead.
+ */
+function writableCacheDir(): string {
+  const candidates = [
+    process.env.WHISPER_CACHE_DIR,
+    // Vercel and most container hosts allow writes to /tmp and nowhere else.
+    existsSync('/tmp') ? '/tmp/whisper-models' : undefined,
+    join(process.cwd(), '.cache', 'whisper-models'),
+  ].filter((p): p is string => Boolean(p));
+
+  for (const dir of candidates) {
+    try {
+      mkdirSync(dir, { recursive: true });
+      return dir;
+    } catch {
+      // Try the next candidate rather than failing the voice note outright.
+    }
+  }
+  throw new Error('No writable directory for the Whisper model cache');
+}
+
 function asr(): Promise<AsrPipeline> {
   if (!modelPromise) {
     const model = process.env.WHISPER_MODEL ?? DEFAULT_MODEL;
     const dtype = (process.env.WHISPER_DTYPE ?? DEFAULT_DTYPE) as never;
-    modelPromise = import('@huggingface/transformers').then(({ pipeline }) =>
-      pipeline('automatic-speech-recognition', model, { dtype }).then((p) => p as unknown as AsrPipeline),
-    );
+    modelPromise = import('@huggingface/transformers').then(({ env, pipeline }) => {
+      env.cacheDir = writableCacheDir();
+      // Model files come from the Hub, not from disk next to the bundle.
+      env.allowLocalModels = false;
+      return pipeline('automatic-speech-recognition', model, { dtype }).then(
+        (p) => p as unknown as AsrPipeline,
+      );
+    });
   }
   return modelPromise;
 }

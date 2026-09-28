@@ -269,6 +269,8 @@ than bolt on something that quietly degrades memory search.
 | Symptom | Cause |
 | --- | --- |
 | Bot replies `401 Invalid secret token` | `TELEGRAM_WEBHOOK_SECRET_TOKEN` differs between Vercel and the value given to `set-webhook`. |
+| Bot ignores messages, and `getWebhookInfo` shows `pending_update_count` climbing | The webhook URL is not registered, so Telegram has nowhere to deliver. Run `npm run webhook -- https://your-app.vercel.app`. |
+| `getWebhookInfo` shows `Wrong response from the webhook: 503` and messages never arrive | A cold-started function served the webhook before the Chat SDK finished initialising. Mastra's route only guards when `initPromise` already exists, so the request was rejected and Telegram held the update. `src/mastra/index.ts` now initialises the channel at module load to close that window. If it persists, check the function's max duration — initialisation needs a few seconds on a cold start. |
 | Bot replies `503 Service unavailable` | The adapter could not reach Telegram or its state store. Check deploy logs and confirm `DATABASE_URL` is remote. |
 | Nobody gets a reply, no errors | A stranger was blocked. Look for `[access] Blocked` in the logs. |
 | Bot forgets everything between messages | `DATABASE_URL` is a `file:` URL on Vercel. The app throws at boot in that case. |

@@ -20,27 +20,79 @@ import { storage } from './db.ts';
  * only route that works through the documented storage API.
  */
 
-/** Commands recognised in a direct message. */
-const COMMANDS = {
-  new: /^\/new\b/i,
-  clear: /^\/clear\b/i,
-  history: /^\/history\b/i,
-} as const;
+export type ChatCommandName = 'new' | 'history' | 'recall';
 
-export type ChatCommand = 'new' | 'history' | null;
+export interface ParsedCommand {
+  command: ChatCommandName;
+  /** Trailing argument, trimmed. Only `/recall` uses one. */
+  arg: string;
+}
 
-export function parseChatCommand(text: string | undefined | null): ChatCommand {
-  const value = (text ?? '').trim();
-  if (!value) return null;
+const COMMANDS: readonly { command: ChatCommandName; pattern: RegExp }[] = [
+  { command: 'recall', pattern: /^\/recall\b\s*(.*)$/i },
   // `/clear` is an alias for `/new`: both mean "start over", and both archive
   // first, so they are deliberately not separate behaviours.
-  if (COMMANDS.new.test(value) || COMMANDS.clear.test(value)) return 'new';
-  if (COMMANDS.history.test(value)) return 'history';
+  { command: 'new', pattern: /^\/new\b/i },
+  { command: 'new', pattern: /^\/clear\b/i },
+  { command: 'history', pattern: /^\/history\b/i },
+];
+
+export function parseChatCommand(text: string | undefined | null): ParsedCommand | null {
+  const value = (text ?? '').trim();
+  if (!value) return null;
+  for (const { command, pattern } of COMMANDS) {
+    const match = pattern.exec(value);
+    if (!match) continue;
+    // A word boundary still allows a trailing query, e.g. "/history?x".
+    if (command === 'recall') return { command, arg: (match[1] ?? '').trim() };
+    return { command, arg: '' };
+  }
   return null;
 }
 
 function archiveResource(resourceId: string): string {
   return `${resourceId}:archive`;
+}
+
+/** Channel metadata that makes Mastra resolve a memory thread for a chat. */
+const CHANNEL_METADATA_KEYS = [
+  'channel_ownerId',
+  'channel_platform',
+  'channel_subscribed',
+  'channel_externalThreadId',
+  'channel_externalChannelId',
+] as const;
+
+/**
+ * Pulls the channel metadata off a thread.
+ *
+ * The Telegram adapter finds its memory thread by `channel_externalThreadId`
+ * (scoped by `channel_ownerId`), with `perPage: 1` and no explicit ordering — and
+ * the PG store defaults that to newest-first, verified by inserting two threads
+ * with the same external id and confirming the newer wins. So whichever thread
+ * carries this metadata and was created most recently is the live one.
+ *
+ * `copyThread` does not propagate it, which is exactly why archives stay invisible
+ * to the channel and `/new` really does reset. Reopening has to put it back.
+ */
+function channelMetadata(
+  source: Record<string, unknown> | null | undefined,
+  resourceId: string,
+): Record<string, string> {
+  const src = source ?? {};
+  const owner = typeof src.channel_ownerId === 'string' ? src.channel_ownerId : 'ceo-agent';
+  // A DM's external thread id is `telegram:<chatId>`, which is the resource id.
+  // Preferring the recorded value keeps forum-topic chats working too.
+  const external =
+    typeof src.channel_externalThreadId === 'string' ? src.channel_externalThreadId : resourceId;
+  return {
+    channel_ownerId: owner,
+    channel_platform: 'telegram',
+    channel_subscribed: 'true',
+    channel_externalThreadId: external,
+    channel_externalChannelId:
+      typeof src.channel_externalChannelId === 'string' ? src.channel_externalChannelId : external,
+  };
 }
 
 /** The live thread for a chat, or undefined if the chat has no history yet. */
@@ -70,6 +122,31 @@ async function listArchives(resourceId: string) {
   return threads;
 }
 
+/**
+ * Copies the live thread into the archive set and deletes it, so the chat starts
+ * empty next time. Returns the number of messages preserved.
+ */
+async function archiveLiveThread(resourceId: string): Promise<number> {
+  const live = await findLiveThread(resourceId);
+  if (!live) return 0;
+
+  const memory = (await storage.getStore('memory'))!;
+  const kept = await countMessages(live.id);
+  const when = new Date().toISOString().slice(0, 16).replace('T', ' ');
+
+  await memory.copyThread({
+    sourceThreadId: live.id,
+    resourceId: archiveResource(resourceId),
+    title: `Archived ${when}`,
+    metadata: {
+      archivedFrom: resourceId,
+      archivedAt: new Date().toISOString(),
+    },
+  });
+  await memory.deleteThread({ threadId: live.id });
+  return kept;
+}
+
 export interface NewChatResult {
   ok: boolean;
   reply: string;
@@ -85,18 +162,7 @@ export async function startNewChat(resourceId: string): Promise<NewChatResult> {
     return { ok: true, reply: 'Nothing to clear — this chat has no history yet.' };
   }
 
-  const kept = await countMessages(live.id);
-  const memory = (await storage.getStore('memory'))!;
-  const when = new Date().toISOString().slice(0, 16).replace('T', ' ');
-
-  await memory.copyThread({
-    sourceThreadId: live.id,
-    resourceId: archiveResource(resourceId),
-    title: `Archived ${when}`,
-    metadata: { archivedFrom: resourceId, archivedAt: new Date().toISOString() },
-  });
-  await memory.deleteThread({ threadId: live.id });
-
+  const kept = await archiveLiveThread(resourceId);
   return {
     ok: true,
     reply:
@@ -105,7 +171,67 @@ export async function startNewChat(resourceId: string): Promise<NewChatResult> {
   };
 }
 
-/** Reports how many archived sessions exist, without restoring them. */
+/**
+ * Reopens a previously archived session, so the agent has that conversation's
+ * context again and the exchange continues from there.
+ *
+ * The current chat is archived first, never discarded — going back and forth
+ * should not cost you either conversation.
+ */
+export async function recallSession(
+  resourceId: string,
+  rawIndex: string,
+): Promise<NewChatResult> {
+  if (!rawIndex) {
+    const listing = await chatHistory(resourceId);
+    return {
+      ok: false,
+      reply: `Usage: /recall <number>\n\n${listing.reply}`,
+    };
+  }
+
+  const archives = await listArchives(resourceId);
+  const index = Number.parseInt(rawIndex, 10);
+  if (!Number.isInteger(index) || index < 1 || index > archives.length) {
+    return {
+      ok: false,
+      reply: `There is no session ${rawIndex}. Send /history to see the numbers.`,
+    };
+  }
+
+  const target = archives[index - 1];
+  const memory = (await storage.getStore('memory'))!;
+
+  // Preserve whatever is live now, so switching back later is possible.
+  const preserved = await archiveLiveThread(resourceId);
+
+  // Restore the chosen session as the live thread. copyThread does not carry the
+  // channel metadata across, so it is re-applied here; without it the channel
+  // would not resolve this thread and the next message would start empty.
+  const restoredMessages = await countMessages(target.id);
+  await memory.copyThread({
+    sourceThreadId: target.id,
+    resourceId,
+    title: target.title ?? undefined,
+    metadata: channelMetadata(target.metadata, resourceId),
+  });
+
+  const when = (target.updatedAt instanceof Date ? target.updatedAt : new Date(String(target.updatedAt)))
+    .toISOString()
+    .slice(0, 16)
+    .replace('T', ' ');
+
+  const extra = preserved
+    ? ` The conversation you were in is archived as well (${preserved} message${preserved === 1 ? '' : 's'}).`
+    : '';
+
+  return {
+    ok: true,
+    reply: `Reopened session ${index} from ${when} — ${restoredMessages} message${restoredMessages === 1 ? '' : 's'} of context restored.${extra}`,
+  };
+}
+
+/** Reports archived sessions, numbered so `/recall <n>` can address one. */
 export async function chatHistory(resourceId: string): Promise<NewChatResult> {
   const archives = await listArchives(resourceId);
   if (archives.length === 0) {
@@ -113,14 +239,16 @@ export async function chatHistory(resourceId: string): Promise<NewChatResult> {
   }
 
   const lines: string[] = [];
-  for (const t of archives) {
+  for (const [i, t] of archives.entries()) {
     const count = await countMessages(t.id);
     const when = t.updatedAt instanceof Date ? t.updatedAt : new Date(String(t.updatedAt));
-    lines.push(`• ${when.toISOString().slice(0, 16).replace('T', ' ')} — ${count} message${count === 1 ? '' : 's'}`);
+    lines.push(
+      `${i + 1}. ${when.toISOString().slice(0, 16).replace('T', ' ')} — ${count} message${count === 1 ? '' : 's'}`,
+    );
   }
 
   return {
     ok: true,
-    reply: `Archived sessions (${archives.length}):\n${lines.join('\n')}\n\nThese stay in the database. /new archives the current chat and starts over.`,
+    reply: `Archived sessions (${archives.length}):\n${lines.join('\n')}\n\nSend /recall <number> to continue an old conversation.`,
   };
 }

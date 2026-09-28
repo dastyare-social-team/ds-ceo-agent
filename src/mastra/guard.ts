@@ -1,6 +1,6 @@
 import type { ChannelHandler, ChannelHandlerContext } from '@mastra/core/channels';
 import { isAllowedUser, REJECTION_NOTICE } from './access.ts';
-import { chatHistory, parseChatCommand, startNewChat } from './commands.ts';
+import { chatHistory, parseChatCommand, recallSession, startNewChat } from './commands.ts';
 
 /**
  * Plain text of an incoming message, or '' when it carries no text part.
@@ -78,18 +78,21 @@ export function createGuardedHandler(
        * `/new` cannot be answered with prose while the thread stays full, and so
        * the command itself never becomes part of the conversation history.
        */
-      const command = parseChatCommand(messageText(message));
-      if (command) {
+      const parsed = parseChatCommand(messageText(message));
+      if (parsed) {
+        const { command, arg } = parsed;
         try {
           const result =
             command === 'new'
               ? await startNewChat(memoryResourceId(thread))
-              : await chatHistory(memoryResourceId(thread));
+              : command === 'recall'
+                ? await recallSession(memoryResourceId(thread), arg)
+                : await chatHistory(memoryResourceId(thread));
           await thread.post(result.reply);
         } catch (error) {
           const logger = ctx?.mastra?.getLogger?.();
           const detail = String((error as Error)?.message ?? error);
-          const line = `[commands] /${command} failed: ${detail}`;
+          const line = `[commands] ${command} failed: ${detail}`;
           if (logger) logger.error(line);
           else console.error(line);
           await thread.post(`Could not run /${command}. Try again in a moment.`);

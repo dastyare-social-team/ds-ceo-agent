@@ -242,7 +242,8 @@ the conversation:
 | --- | --- |
 | `/new` | Archives the current conversation, clears the chat, starts fresh. |
 | `/clear` | Alias of `/new`. |
-| `/history` | Lists archived sessions with message counts and timestamps. |
+| `/history` | Lists archived sessions, numbered, with message counts and timestamps. |
+| `/recall <n>` | Reopens archived session `n`, so the agent has that context again. |
 
 `/new` **archives rather than discards**. The live thread is copied to a
 `…:archive` thread in the same Postgres database and then deleted, so the old
@@ -255,9 +256,29 @@ when a thread is first created and the platform-to-memory mapping is persisted
 afterwards, so it cannot re-point an existing chat. Archive-and-delete is the
 route that works through the documented storage API.
 
-Archived sessions are not browsable in Telegram — `/history` reports what exists.
-If you want to actually read one back, it is a thread under
-`<resourceId>:archive` in `mastra_threads`.
+### Going back to an earlier session
+
+`/recall <n>` continues an old conversation:
+
+1. `/new`, talk, `/new` again, talk — you now have two archived sessions.
+2. `/history` numbers them, newest first.
+3. `/recall 1` puts session 1 back: the agent answers with that conversation's
+   context and the exchange carries on from there.
+
+The conversation you were in is archived rather than discarded, so you can bounce
+between sessions as much as you like without losing either.
+
+**How this works.** The Telegram adapter resolves its memory thread by looking
+for `metadata.channel_externalThreadId` (scoped by `channel_ownerId`), taking
+`perPage: 1` with no explicit ordering. The Postgres store defaults that to
+newest-first — verified by inserting two threads sharing an external id and
+confirming the newer is chosen. `copyThread` does **not** carry that metadata
+across, which is precisely why an archive is invisible to the channel and `/new`
+genuinely resets. `/recall` therefore re-applies the channel metadata when
+restoring, making the recovered thread the newest resolvable one.
+
+Both properties are covered by tests that resolve threads exactly as the adapter
+does, rather than trusting that the copy worked.
 
 ## Security notes
 

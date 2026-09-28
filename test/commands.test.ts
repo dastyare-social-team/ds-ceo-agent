@@ -10,7 +10,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { Client } from 'pg';
 import { storage } from '../src/mastra/db.ts';
-import { chatHistory, parseChatCommand, startNewChat } from '../src/mastra/commands.ts';
+import { chatHistory, parseChatCommand, recallSession, startNewChat } from '../src/mastra/commands.ts';
 
 /**
  * The PG store has no `createThread` — threads are created by the channel or the
@@ -45,13 +45,35 @@ async function cleanup(resourceId: string) {
 }
 
 /** Creates a thread row and writes messages into it. */
-async function seed(resourceId: string, threadId: string, texts: string[]) {
+/** What the Telegram adapter writes onto the live thread. */
+function channelMetadata(resourceId: string) {
+  return {
+    channel_ownerId: 'ceo-agent',
+    channel_platform: 'telegram',
+    channel_subscribed: 'true',
+    channel_externalThreadId: resourceId,
+    channel_externalChannelId: resourceId,
+  };
+}
+
+async function seed(
+  resourceId: string,
+  threadId: string,
+  texts: string[],
+  opts: { title?: string; externalId?: string; age?: string } = {},
+) {
+  const meta = opts.externalId ? channelMetadata(opts.externalId) : {};
+  // "age" shifts the timestamps so newest-first ordering is deterministic.
+  const age = opts.age ?? null;
+  const at = age ? '$5::timestamptz' : 'NOW()';
   await withClient(async c => {
     await c.query(
       `INSERT INTO mastra_threads (id, "resourceId", title, metadata, "createdAt", "updatedAt", "createdAtZ", "updatedAtZ")
-       VALUES ($1, $2, $3, '{}'::jsonb, NOW(), NOW(), NOW(), NOW())
+       VALUES ($1, $2, $3, $4::jsonb, ${at}, ${at}, ${at}, ${at})
        ON CONFLICT (id) DO NOTHING`,
-      [threadId, resourceId, 'seed'],
+      age === null
+        ? [threadId, resourceId, opts.title ?? 'seed', JSON.stringify(meta)]
+        : [threadId, resourceId, opts.title ?? 'seed', JSON.stringify(meta), age],
     );
   });
 
@@ -70,11 +92,18 @@ async function seed(resourceId: string, threadId: string, texts: string[]) {
 }
 
 test('only exact commands are recognised, and /clear aliases /new', () => {
-  assert.equal(parseChatCommand('/new'), 'new');
-  assert.equal(parseChatCommand('/new '), 'new');
-  assert.equal(parseChatCommand('/NEW'), 'new');
-  assert.equal(parseChatCommand('/clear'), 'new');
-  assert.equal(parseChatCommand('/history'), 'history');
+  assert.deepEqual(parseChatCommand('/new'), { command: 'new', arg: '' });
+  assert.deepEqual(parseChatCommand('/new '), { command: 'new', arg: '' });
+  assert.deepEqual(parseChatCommand('/NEW'), { command: 'new', arg: '' });
+  assert.deepEqual(parseChatCommand('/clear'), { command: 'new', arg: '' });
+  assert.deepEqual(parseChatCommand('/history'), { command: 'history', arg: '' });
+});
+
+test('/recall carries its session number', () => {
+  assert.deepEqual(parseChatCommand('/recall 2'), { command: 'recall', arg: '2' });
+  assert.deepEqual(parseChatCommand('/recall  12  '), { command: 'recall', arg: '12' });
+  assert.deepEqual(parseChatCommand('/recall'), { command: 'recall', arg: '' });
+  assert.equal(parseChatCommand('/recallable'), null);
 });
 
 test('ordinary messages are not treated as commands', () => {
@@ -133,6 +162,108 @@ test('/new on a chat with no history is harmless', async () => {
     const result = await startNewChat(resource);
     assert.equal(result.ok, true);
     assert.match(result.reply, /Nothing to clear/);
+  } finally {
+    await cleanup(resource);
+  }
+});
+
+/** How the Telegram adapter finds its memory thread, reproduced from Mastra. */
+async function resolveLiveThread(resourceId: string) {
+  const memory = (await storage.getStore('memory'))!;
+  const { threads } = await memory.listThreads({
+    filter: { metadata: { channel_externalThreadId: resourceId, channel_ownerId: 'ceo-agent' } },
+    perPage: 1,
+  });
+  return threads[0] ?? null;
+}
+
+test('archives stay invisible to the channel, so /new really resets context', async () => {
+  const resource = scratchResource();
+  try {
+    await seed(resource, 't-live', ['secret earlier context'], { externalId: resource });
+    assert.ok(await resolveLiveThread(resource), 'channel must see the live thread');
+
+    await startNewChat(resource);
+
+    assert.equal(
+      await resolveLiveThread(resource),
+      null,
+      'no thread may resolve after /new, or the old context would come back',
+    );
+  } finally {
+    await cleanup(resource);
+  }
+});
+
+test('/recall restores an archived session as the live thread', async () => {
+  const resource = scratchResource();
+  try {
+    // Session 1, then /new, then a different session 2.
+    await seed(resource, 't-one', ['ALPHA context'], { externalId: resource, age: '2026-01-01T10:00:00Z' });
+    await startNewChat(resource);
+    await seed(resource, 't-two', ['BETA context'], { externalId: resource });
+
+    assert.match(
+      JSON.stringify(await (await (await storage.getStore('memory'))!).listMessages({ threadId: (await resolveLiveThread(resource))!.id })),
+      /BETA context/,
+      'session 2 should be live',
+    );
+
+    const recalled = await recallSession(resource, '1');
+    assert.equal(recalled.ok, true);
+    assert.match(recalled.reply, /Reopened session 1/);
+
+    const live = await resolveLiveThread(resource);
+    assert.ok(live, 'the restored thread must be resolvable by the channel');
+    const messages = await (await storage.getStore('memory'))!.listMessages({ threadId: live.id });
+    assert.match(
+      JSON.stringify(messages.messages),
+      /ALPHA context/,
+      'the agent must have the old context again',
+    );
+  } finally {
+    await cleanup(resource);
+  }
+});
+
+test('/recall archives what was live rather than discarding it', async () => {
+  const resource = scratchResource();
+  try {
+    await seed(resource, 't-one', ['ALPHA'], { externalId: resource, age: '2026-01-01T10:00:00Z' });
+    await startNewChat(resource);
+    await seed(resource, 't-two', ['BETA'], { externalId: resource });
+
+    const recalled = await recallSession(resource, '1');
+    assert.match(recalled.reply, /archived as well/, 'BETA must be kept');
+
+    const memory = (await storage.getStore('memory'))!;
+    const { threads } = await memory.listThreads({
+      filter: { resourceId: `${resource}:archive` },
+      perPage: 50,
+    });
+    const all = JSON.stringify(
+      await Promise.all(threads.map(async t => (await memory.listMessages({ threadId: t.id })).messages)),
+    );
+    assert.match(all, /BETA/, 'the conversation we left must still exist');
+  } finally {
+    await cleanup(resource);
+  }
+});
+
+test('/recall rejects a session number that does not exist', async () => {
+  const resource = scratchResource();
+  try {
+    await seed(resource, 't-one', ['ALPHA'], { externalId: resource });
+    await startNewChat(resource);
+
+    for (const bad of ['9', '0', '-1', 'abc']) {
+      const result = await recallSession(resource, bad);
+      assert.equal(result.ok, false, `${bad} should be rejected`);
+      assert.match(result.reply, /no session 9|Send \/history/);
+    }
+
+    const noArg = await recallSession(resource, '');
+    assert.match(noArg.reply, /Usage: \/recall <number>/);
   } finally {
     await cleanup(resource);
   }

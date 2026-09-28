@@ -225,64 +225,83 @@ resolves, so awaiting a send inside a processor deadlocks. There is no error and
 nothing in the logs; the webhook returns 200 and the bot goes silent. From the
 handler, outside the run, the same I/O is safe.
 
-## Voice notes (local Whisper, sherpa-onnx)
+## Voice notes (Groq Whisper, local sherpa-onnx fallback)
 
-Voice messages are transcribed **in the process**, not by an API. No key is
-needed and no audio leaves the machine.
+Voice messages are transcribed by **Groq**, and echoed as `🎤 Heard (...): ...`
+before the answer, so a misheard message can be corrected rather than answered
+wrongly. A note that already has a caption is left alone, since the caption is
+the text.
 
     Telegram OGG/Opus bytes
-      -> ogg-opus-decoder (WASM) -> 16kHz mono PCM
-      -> sherpa-onnx (ONNX) -> text
+      -> POST https://api.groq.com/openai/v1/audio/transcriptions -> text
 
-The transcript is echoed as `🎤 Heard: ...` before the answer, so a misheard
-message can be corrected rather than answered wrongly. A voice note that already
-has a caption is left alone, since the caption is the text.
+Whisper reads the OGG/Opus container directly, so the bytes are uploaded exactly
+as received — no decoder, no resampling, no WAV. A 4s voice note comes back in
+**0.7s** and accuracy is better than the local engine on the same file
+(`Hester Prynne` vs `Hester print`).
 
 | Variable | Default | Notes |
 | --- | --- | --- |
-| `WHISPER_MODEL` | `sherpa-onnx-whisper-tiny.en` | English only. See below for other languages. |
+| `GROQ_API_KEY` | — | Free tier, no credit card. Without it the bot runs local. |
+| `TRANSCRIBE_PROVIDER` | `auto` | `auto` / `groq` / `local`. See below. |
+| `GROQ_STT_MODEL` | `whisper-large-v3` | `whisper-large-v3-turbo` is faster and cheaper on quota. |
+| `WHISPER_MODEL` | `sherpa-onnx-whisper-tiny.en` | Local fallback. English only. |
 | `WHISPER_CACHE_DIR` | `/tmp/sherpa-models` | Must be writable. Never inside `node_modules`. |
-| `THINKING_EDIT_THROTTLE_MS` | `900` | Live-thinking edit rate limit. |
+
+### Which engine runs
+
+Read on every voice note, so a redeploy that only changes the variable is enough.
+
+| `TRANSCRIBE_PROVIDER` | Behaviour |
+| --- | --- |
+| `auto` (default) | Groq when `GROQ_API_KEY` is set, local otherwise. If the hosted call fails it retries locally and reports **both** errors. |
+| `groq` | Groq only. A missing key is an error, never a silent switch to local. |
+| `local` | sherpa-onnx only, ignoring any key. No network at all. |
+
+The engine is named in the `Heard` line, because the default sends audio to a
+third party and a reader of the transcript deserves to know.
+
+### Privacy
+
+`auto` with a key uploads audio to Groq. `local` keeps it on the machine. That
+is the only meaningful difference between the two.
+
+### The local fallback
+
+sherpa-onnx is retained because it needs no key, no card and no network, and
+because it is the escape hatch if the hosted quota is exhausted. Nothing imports
+it until it is the chosen engine, so a missing native binary cannot affect a run
+that Groq already served.
+
+Its one real weakness on Vercel is the cold start: int8 models download from
+GitHub on first use, cache in per-instance `/tmp`, and that cache dies with the
+instance. So a cold local run can pay ~2 min, which is exactly the cost the hosted
+path removes. Nothing is downloaded at boot, deliberately — doing that in
+`index.ts` stalled module evaluation and took the whole bot offline.
 
 ### Why sherpa-onnx and not transformers.js
 
-The first implementation used `@huggingface/transformers`, which pulls in both
-`onnxruntime-node` and `onnxruntime-web` as **hard** dependencies: 427MB of
-inference backends for every platform at once. The Vercel function limit is
-250MB, so the deploy could not succeed at all, and pruning the unused platforms
-and WASM variants only reached 425MB.
-
+The first local implementation used `@huggingface/transformers`, which pulls in
+both `onnxruntime-node` and `onnxruntime-web` as **hard** dependencies: 427MB of
+inference backends for every platform at once, against a 250MB Vercel limit.
 sherpa-onnx is a 0MB JavaScript wrapper over a single platform-specific binary —
 31MB on linux-x64 — with int8 models fetched at runtime.
 
-| | transformers.js | sherpa-onnx |
-| --- | --- | --- |
-| Runtime weight | 427MB | 31MB |
-| Function bundle | 660.9MB (over limit) | **199.0MB** |
-| 4s voice note, warm | ~60s | **0.3s** |
-| First use | 60s | ~2 min, 118MB download |
-
-### Deployment facts
-
-**First voice note after a cold start is slow.** Models download from GitHub on
-first use and cache on disk. On Vercel that cache is per-instance in `/tmp`, so
-it is not shared and is lost when the instance recycles. Nothing is downloaded at
-boot, deliberately: doing that in `index.ts` stalled module evaluation and took
-the whole bot offline.
-
-**Nothing is imported eagerly.** The Opus decoder and the recogniser are both
-dynamic imports, so text-only traffic never pays for them.
-
-Verified on real speech: a 4s OGG/Opus note transcribed in 0.3s to
-*"Yet these thoughts affected Hester print less with hope than at present."*
+| | transformers.js | sherpa-onnx | Groq |
+| --- | --- | --- | --- |
+| Runtime weight | 427MB | 31MB | 0 |
+| Function bundle | 660.9MB (over limit) | 199.0MB | 199.0MB |
+| 4s voice note, warm | ~60s | 0.3s | **0.7s from cold** |
+| First use | 60s | ~2 min, 118MB download | none |
 
 ### Other languages
 
-`whisper-tiny.en` is English-only. sherpa-onnx also ships multilingual Whisper
-(`sherpa-onnx-whisper-base`, and larger variants), `sense-voice`
-(zh/en/ja/ko/yue), and Moonshine. Set `WHISPER_MODEL` to the release name under
-k2-fsa/sherpa-onnx `asr-models`; the loader downloads and unpacks whatever is
-named. Note that the file naming inside those archives differs — see `stem()` in
+`whisper-tiny.en` is English-only, but the hosted default is not:
+`whisper-large-v3` is multilingual, so Persian works with no configuration.
+For local Persian, set `WHISPER_MODEL` to a multilingual release under
+k2-fsa/sherpa-onnx `asr-models` (`sherpa-onnx-whisper-base` and larger, or
+`sense-voice` for zh/en/ja/ko/yue). The loader downloads and unpacks whatever
+is named; file naming inside those archives differs, see `stem()` in
 `src/mastra/voice.ts`.
 
 ### Trimming the bundle

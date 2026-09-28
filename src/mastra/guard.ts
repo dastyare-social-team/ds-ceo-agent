@@ -2,7 +2,7 @@ import type { ChannelHandler, ChannelHandlerContext } from '@mastra/core/channel
 import { isAllowedUser, REJECTION_NOTICE } from './access.ts';
 import { chatHistory, parseChatCommand, recallSession, startNewChat } from './commands.ts';
 import type { SentMessageLike } from './processors/progress-types.ts';
-import { isVoiceMessage, transcribeVoice } from './voice.ts';
+import { isVoiceMessage, providerLabel, transcribeVoice } from './voice.ts';
 
 /**
  * Plain text of an incoming message.
@@ -150,8 +150,10 @@ export function createGuardedHandler(
        */
       if (isVoiceMessage(message as never)) {
         try {
-          const { text: transcript, seconds } = await transcribeVoice(message as never);
-          await thread.post(`🎤 Heard (local Whisper, ${Math.round(seconds)}s): ${transcript}`);
+          const { text: transcript, seconds, provider } = await transcribeVoice(message as never);
+          // The engine is named because the default is hosted: someone reading
+          // their own transcript deserves to know where the audio went.
+          await thread.post(`🎤 Heard (${providerLabel(provider)}, ${Math.round(seconds)}s): ${transcript}`);
           await defaultHandler(
             thread,
             // Same message with the transcript as its text, so threading, memory

@@ -6,32 +6,54 @@ import { join } from 'node:path';
 import { createRequire } from 'node:module';
 
 /**
- * Voice notes, transcribed locally.
+ * Voice notes, transcribed by Groq with a local sherpa-onnx fallback.
  *
- * Telegram delivers OGG/Opus. sherpa-onnx wants 16kHz mono PCM, so the bytes go
- * through a pure-WASM Opus decoder, get resampled, and are recognised in-process.
- * No API key, and no audio leaves the machine.
+ * Telegram delivers OGG/Opus. Groq's Whisper endpoint accepts that container
+ * directly, so the hosted path uploads the bytes unmodified — no decoder, no
+ * resampling, no WAV, no format sniffing. Measured 0.7s for a 4s voice note.
  *
- * Why sherpa-onnx and not transformers.js: the Whisper runtime it replaces pulled
- * in onnxruntime-node and onnxruntime-web as hard dependencies, which is 427MB of
- * inference backends for every platform at once, and the Vercel function limit is
- * 250MB. sherpa-onnx is a 0MB JS wrapper over one platform-specific binary —
- * 31MB on linux-x64 — with int8 models fetched at runtime. Same job, a fraction of
- * the weight, and measured far faster: 0.1s versus 60s for the same file.
+ * Why hosted by default: the local path works, but only just. It needs a
+ * platform-native ONNX binary that has to be present in the deployed function
+ * for the exact platform Vercel picked, plus a ~2 min model download on every
+ * cold start, because /tmp is wiped when an instance recycles. A hosted
+ * endpoint has none of those failure modes and it is an order of magnitude
+ * faster, so it is tried first whenever a key is present.
  *
- * Nothing is imported eagerly. The Opus decoder and the recogniser are both loaded
- * on first use, so a text-only run never pays for them.
+ * The local recogniser is still here on purpose. It needs no API key, no credit
+ * card and no network, it keeps audio on the machine, and nothing imports it
+ * until it is actually the chosen provider — so a broken native binary can
+ * never affect a run that Groq already served.
+ *
+ * Which one runs is decided by TRANSCRIBE_PROVIDER:
+ *   auto  (default) Groq when GROQ_API_KEY is set, otherwise local
+ *   groq             Groq only; a missing key is an error, never a silent switch
+ *   local            sherpa-onnx only, ignoring any key
  */
 
-const DEFAULT_MODEL = 'sherpa-onnx-whisper-tiny.en';
+/** Where the hosted path sends audio, and what to tell a reader about it. */
+const GROQ_ENDPOINT = 'https://api.groq.com/openai/v1/audio/transcriptions';
+const DEFAULT_GROQ_MODEL = 'whisper-large-v3';
+/** Generous next to the 0.7-1.8s it actually takes, short enough to still report an error. */
+const GROQ_TIMEOUT_MS = 25_000;
+
+const DEFAULT_LOCAL_MODEL = 'sherpa-onnx-whisper-tiny.en';
 const ASR_SAMPLE_RATE = 16_000;
 const MAX_BYTES = 20 * 1024 * 1024;
 const MAX_SECONDS = 5 * 60;
+
+export type TranscribeProvider = 'groq' | 'local';
 
 export interface TranscribedVoice {
   text: string;
   /** Seconds of audio, useful for logging and for the "too long" guard. */
   seconds: number;
+  /** Which engine produced this, so the reply never mislabels the source. */
+  provider: TranscribeProvider;
+}
+
+/** Human-readable engine name for the "Heard (...)" line the user sees. */
+export function providerLabel(provider: TranscribeProvider): string {
+  return provider === 'groq' ? 'Groq Whisper' : 'local Whisper';
 }
 
 type AudioAttachment = { type?: string; fetchData?: () => Promise<unknown> };
@@ -59,6 +81,95 @@ async function audioBytes(message: unknown): Promise<Uint8Array> {
 }
 
 /**
+ * Keeps a credential or a bearer token out of anything the user might see.
+ *
+ * The hosted error path is the one place a secret could plausibly escape: an
+ * HTTP failure body or a thrown fetch error can echo the request headers back.
+ * Since that detail ends up in a Telegram message, every provider error goes
+ * through here first.
+ */
+function redact(detail: string): string {
+  return detail
+    .replace(/gsk_[A-Za-z0-9_-]+/g, 'gsk_***')
+    .replace(/(bearer\s+)[A-Za-z0-9._~+/-]+=*/gi, '$1***');
+}
+
+/**
+ * Picks the engine for this call.
+ *
+ * The key is read on every call rather than at import time so a redeploy that
+ * only changes an environment variable takes effect, and so tests can exercise
+ * both branches without reloading the module.
+ *
+ * The *mode* is kept separate from the engine it resolves to, because the two
+ * behave differently: an explicit `groq` must fail rather than quietly fall
+ * back, while `auto` is precisely the request to fall back.
+ */
+function resolveMode(): 'auto' | 'groq' | 'local' {
+  const requested = (process.env.TRANSCRIBE_PROVIDER ?? 'auto').trim().toLowerCase();
+  if (requested === 'groq' || requested === 'local') return requested;
+  return 'auto';
+}
+
+/** Pulls the message out of a Groq error body, falling back to a raw excerpt. */
+function groqErrorBody(raw: string): string {
+  try {
+    const parsed = JSON.parse(raw) as { error?: { message?: string } };
+    if (parsed?.error?.message) return parsed.error.message;
+  } catch {
+    // Not JSON. Fall through to the raw excerpt below.
+  }
+  return raw.slice(0, 300);
+}
+
+async function transcribeWithGroq(bytes: Uint8Array): Promise<{ text: string; seconds: number }> {
+  const key = process.env.GROQ_API_KEY?.trim();
+  if (!key) throw new Error('TRANSCRIBE_PROVIDER=groq but GROQ_API_KEY is empty');
+
+  const form = new FormData();
+  // Telegram voice notes are OGG/Opus. Whisper reads the container as-is, so the
+  // bytes are uploaded exactly as received and the filename is the only fiction.
+  form.set('file', new Blob([new Uint8Array(bytes)], { type: 'audio/ogg' }), 'voice.ogg');
+  form.set('model', process.env.GROQ_STT_MODEL?.trim() || DEFAULT_GROQ_MODEL);
+  // verbose_json rather than json, because the duration is what the "Heard (Ns)"
+  // line reports and there is no way to measure it without decoding the audio.
+  form.set('response_format', 'verbose_json');
+
+  let response: Response;
+  try {
+    response = await fetch(GROQ_ENDPOINT, {
+      method: 'POST',
+      headers: { authorization: `Bearer ${key}` },
+      body: form,
+      signal: AbortSignal.timeout(GROQ_TIMEOUT_MS),
+    });
+  } catch (cause) {
+    throw new Error(`Could not reach Groq: ${redact(String((cause as Error)?.message ?? cause))}`);
+  }
+
+  const raw = await response.text();
+  if (!response.ok) {
+    throw new Error(`Groq returned HTTP ${response.status}: ${redact(groqErrorBody(raw))}`);
+  }
+
+  let payload: { text?: string; duration?: number };
+  try {
+    payload = JSON.parse(raw) as typeof payload;
+  } catch {
+    throw new Error(`Groq sent a body that was not JSON: ${redact(raw.slice(0, 300))}`);
+  }
+  if (typeof payload.text !== 'string') {
+    throw new Error(`Groq sent no transcript: ${redact(raw.slice(0, 300))}`);
+  }
+  return { text: payload.text, seconds: payload.duration ?? 0 };
+}
+
+// --- local path -------------------------------------------------------------
+// Everything below is the sherpa-onnx recogniser and its one-time model unpack.
+// It is only reached when local is the chosen provider, or as a fallback after a
+// hosted failure, so the heavy imports stay dynamic and off the hosted path.
+
+/**
  * Model files are downloaded on first use. transformers.js defaulted its cache to a
  * directory inside node_modules, which is read-only on Vercel and failed with
  * ENOENT on mkdir, so the same rule applies here: only a genuinely writable path
@@ -83,7 +194,7 @@ function cacheRoot(): string {
 }
 
 function modelName(): string {
-  return process.env.WHISPER_MODEL ?? DEFAULT_MODEL;
+  return process.env.WHISPER_MODEL ?? DEFAULT_LOCAL_MODEL;
 }
 
 /**
@@ -122,7 +233,6 @@ async function ensureModel(): Promise<string> {
   const base = 'https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models';
   // The archive unpacks into a directory of the same name, so extract one level up
   // and let tar create it. Writing the archive inside it first fails with ENOENT.
-  const archive = join(cacheRoot(), `${name}.tar.bz2`);
   const url = `${base}/${name}.tar.bz2`;
 
   mkdirSync(dir, { recursive: true });
@@ -256,14 +366,7 @@ async function toPcm16k(bytes: Uint8Array): Promise<{ samples: Float32Array; sec
   return { samples, seconds };
 }
 
-/** Transcribes a Telegram voice message on this machine. */
-export async function transcribeVoice(message: unknown): Promise<TranscribedVoice> {
-  const bytes = await audioBytes(message);
-  if (bytes.byteLength === 0) throw new Error('Voice message was empty');
-  if (bytes.byteLength > MAX_BYTES) {
-    throw new Error(`Voice message is ${Math.round(bytes.byteLength / 1024 / 1024)}MB; limit is 20MB`);
-  }
-
+async function transcribeLocally(bytes: Uint8Array): Promise<{ text: string; seconds: number }> {
   const { samples, seconds } = await toPcm16k(bytes);
   if (samples.length === 0) throw new Error('Voice message decoded to no audio');
 
@@ -279,6 +382,51 @@ export async function transcribeVoice(message: unknown): Promise<TranscribedVoic
   const { text } = engine.getResult(stream);
 
   return { text: text.trim(), seconds };
+}
+
+// --- entry point ------------------------------------------------------------
+
+/** Transcribes a Telegram voice message, hosted first when a key is configured. */
+export async function transcribeVoice(message: unknown): Promise<TranscribedVoice> {
+  const bytes = await audioBytes(message);
+  if (bytes.byteLength === 0) throw new Error('Voice message was empty');
+  if (bytes.byteLength > MAX_BYTES) {
+    throw new Error(`Voice message is ${Math.round(bytes.byteLength / 1024 / 1024)}MB; limit is 20MB`);
+  }
+
+  const mode = resolveMode();
+
+  if (mode === 'groq') {
+    // An explicit groq must not quietly become a local run, so a missing key here
+    // is an error rather than a fallback.
+    return { ...(await transcribeWithGroq(bytes)), provider: 'groq' };
+  }
+
+  if (mode === 'local') {
+    return { ...(await transcribeLocally(bytes)), provider: 'local' };
+  }
+
+  // auto without a key is just local: do not open a socket to find that out.
+  if (!process.env.GROQ_API_KEY?.trim()) {
+    return { ...(await transcribeLocally(bytes)), provider: 'local' };
+  }
+
+  // auto with a key: hosted first, local as the rescue.
+  try {
+    return { ...(await transcribeWithGroq(bytes)), provider: 'groq' };
+  } catch (hosted) {
+    const hostedDetail = String((hosted as Error)?.message ?? hosted);
+    try {
+      return { ...(await transcribeLocally(bytes)), provider: 'local' };
+    } catch (local) {
+      // Both failed. The hosted reason leads, because on a serverless deploy the
+      // local failure is usually just a missing native binary and the hosted one
+      // is the part a reader can act on.
+      throw new Error(
+        `${hostedDetail} — local fallback also failed: ${redact(String((local as Error)?.message ?? local))}`,
+      );
+    }
+  }
 }
 
 /** Models available for WHISPER_MODEL, for the error message when one is missing. */

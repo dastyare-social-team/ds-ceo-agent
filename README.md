@@ -225,45 +225,65 @@ resolves, so awaiting a send inside a processor deadlocks. There is no error and
 nothing in the logs; the webhook returns 200 and the bot goes silent. From the
 handler, outside the run, the same I/O is safe.
 
-## Voice notes (local Whisper)
+## Voice notes (local Whisper, sherpa-onnx)
 
-Voice messages are transcribed **in the process**, not by an API. No transcription key
-is needed and no audio leaves the machine.
+Voice messages are transcribed **in the process**, not by an API. No key is
+needed and no audio leaves the machine.
 
     Telegram OGG/Opus bytes
-      -> ogg-opus-decoder (WASM) -> Float32 PCM at 48kHz
-      -> @huggingface/transformers -> Whisper (ONNX) -> text
+      -> ogg-opus-decoder (WASM) -> 16kHz mono PCM
+      -> sherpa-onnx (ONNX) -> text
 
-`src/mastra/voice.ts` holds this. The flow exists because no free chat model on the
-chain accepts audio, so the words have to exist before the model is called.
-
-The transcript is echoed back as `🎤 Heard: ...` before the answer, so a misheard
-message can be corrected instead of answered wrongly. A voice note that already has a
-caption is left alone — the caption is the text.
+The transcript is echoed as `🎤 Heard: ...` before the answer, so a misheard
+message can be corrected rather than answered wrongly. A voice note that already
+has a caption is left alone, since the caption is the text.
 
 | Variable | Default | Notes |
 | --- | --- | --- |
-| `WHISPER_MODEL` | `Xenova/whisper-tiny.en` | Use `Xenova/whisper-base` for multilingual or better accuracy. |
-| `WHISPER_DTYPE` | `q8` | `q4` is smaller and faster, `fp32` is most accurate and largest. |
+| `WHISPER_MODEL` | `sherpa-onnx-whisper-tiny.en` | English only. See below for other languages. |
+| `WHISPER_CACHE_DIR` | `/tmp/sherpa-models` | Must be writable. Never inside `node_modules`. |
 | `THINKING_EDIT_THROTTLE_MS` | `900` | Live-thinking edit rate limit. |
 
-### Two deployment facts worth knowing
+### Why sherpa-onnx and not transformers.js
 
-1. **First voice note after a cold start is slow.** Weights are fetched from Hugging
-   Face on first use and cached on disk. On Vercel that cache is per-instance in
-   `/tmp`, so it is not shared. `warmVoiceModel()` runs at boot to pay the download
-   early, and the model is loaded once per process and reused.
+The first implementation used `@huggingface/transformers`, which pulls in both
+`onnxruntime-node` and `onnxruntime-web` as **hard** dependencies: 427MB of
+inference backends for every platform at once. The Vercel function limit is
+250MB, so the deploy could not succeed at all, and pruning the unused platforms
+and WASM variants only reached 425MB.
 
-2. **Function bundle size is the real risk.** `onnxruntime-node` is a hard dependency of
-   `@huggingface/transformers` and ships prebuilt binaries for every platform
-   (~287MB: darwin 85MB + win32 133MB + linux 68MB). Vercel's Node function limit is
-   250MB uncompressed, so a naive deploy can fail on size. `vercel.json` excludes the
-   darwin and win32 binaries, keeping only linux. This is verified locally but not
-   against a real Vercel deploy — if the deploy fails on size, the fallback is to force
-   the WASM backend (no native binaries) at the cost of slower inference.
+sherpa-onnx is a 0MB JavaScript wrapper over a single platform-specific binary —
+31MB on linux-x64 — with int8 models fetched at runtime.
 
-Verified locally end to end on a real 2s OGG/Opus file: decode plus inference in about
-1s on `whisper-tiny.en`.
+| | transformers.js | sherpa-onnx |
+| --- | --- | --- |
+| Runtime weight | 427MB | 31MB |
+| Function bundle | 660.9MB (over limit) | **199.0MB** |
+| 4s voice note, warm | ~60s | **0.3s** |
+| First use | 60s | ~2 min, 118MB download |
+
+### Deployment facts
+
+**First voice note after a cold start is slow.** Models download from GitHub on
+first use and cache on disk. On Vercel that cache is per-instance in `/tmp`, so
+it is not shared and is lost when the instance recycles. Nothing is downloaded at
+boot, deliberately: doing that in `index.ts` stalled module evaluation and took
+the whole bot offline.
+
+**Nothing is imported eagerly.** The Opus decoder and the recogniser are both
+dynamic imports, so text-only traffic never pays for them.
+
+Verified on real speech: a 4s OGG/Opus note transcribed in 0.3s to
+*"Yet these thoughts affected Hester print less with hope than at present."*
+
+### Other languages
+
+`whisper-tiny.en` is English-only. sherpa-onnx also ships multilingual Whisper
+(`sherpa-onnx-whisper-base`, and larger variants), `sense-voice`
+(zh/en/ja/ko/yue), and Moonshine. Set `WHISPER_MODEL` to the release name under
+k2-fsa/sherpa-onnx `asr-models`; the loader downloads and unpacks whatever is
+named. Note that the file naming inside those archives differs — see `stem()` in
+`src/mastra/voice.ts`.
 
 ## Chat history and commands
 

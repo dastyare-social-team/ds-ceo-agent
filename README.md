@@ -294,7 +294,7 @@ there is room, but the headroom is better spent elsewhere.
 
     npm run build:vercel
 
-`npm run build:vercel` chains all three steps (build, slim, check) so the trim cannot be forgotten after a rebuild. It brings the function to **118MB**. It removes only `.map` and `.d.ts` sidecars.
+`npm run build` runs the trim itself, so it cannot be skipped by a rebuild on Vercel. It brings the function to **118MB**. It removes only `.map` and `.d.ts` sidecars.
 
 The TypeScript compiler (24MB) is deliberately **not** removed. It reaches the
 output through `typescript-paths`, which the deployer uses at build time to
@@ -306,6 +306,12 @@ that would need a real deploy to prove safe, and 24MB is not worth guessing over
 `npm run check:bundle` reports the size against Vercel's limit and exits non-zero
 if a function is too big, so this fails locally in seconds rather than after a
 deploy.
+
+The trim also asserts that the voice packages are present in the built function,
+resolving them from inside the output directory. This check is not decoration: a
+module missing from the deployer's dependency list is installed by neither the
+build nor Vercel, and the symptom is a bare `Cannot find module` on Vercel only
+while `npm run build` looks healthy. It was found twice that way.
 
 Verified: after trimming, the built entry still loads and exports its HTTP
 handlers, and every one of the 3419 relative imports across the bundle resolves.

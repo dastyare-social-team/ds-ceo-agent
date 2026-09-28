@@ -6,8 +6,7 @@
   "type": "module",
   "scripts": {
     "dev": "mastra dev",
-    "build": "mastra build",
-    "build:vercel": "npm run build && npm run slim:bundle && npm run check:bundle",
+    "build": "mastra build && node scripts/slim-bundle.mjs",
     "slim:bundle": "node scripts/slim-bundle.mjs",
     "check:bundle": "node scripts/check-bundle-size.mjs",
     "typecheck": "tsc --noEmit",

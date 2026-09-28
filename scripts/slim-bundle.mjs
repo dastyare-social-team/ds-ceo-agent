@@ -21,9 +21,10 @@
  *   - JavaScript source files. Only the .map and .d.ts sidecars go.
  */
 import { cpSync, existsSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { createRequire } from 'node:module';
+import { join, resolve } from 'node:path';
 
-const funcDir = process.argv[2] ?? '.vercel/output/functions/index.func';
+const funcDir = resolve(process.argv[2] ?? '.vercel/output/functions/index.func');
 if (!existsSync(funcDir)) {
   console.error('No built function. Run `npm run build` first.');
   process.exit(1);
@@ -149,6 +150,55 @@ if (existsSync(outputPkgPath)) {
     console.log(`  copied   : ${name}`);
   }
 }
+
+/**
+ * Assert that everything the voice path loads at runtime is present in the built
+ * function.
+ *
+ * This check exists because two failures here were invisible until deployment.
+ * The deployer writes its own dependency list, omitting packages the app
+ * imports, and those modules are then installed by neither the build nor Vercel.
+ * The symptom is a bare "Cannot find module" at runtime on Vercel only, while
+ * `npm run build` looks perfectly healthy. Resolving the imports from inside the
+ * output directory is the only way to see it before deploying.
+ *
+ * The native binary cannot be checked this way: it is the linux build on the
+ * deploy host and the darwin one here, so it is only ever present in the tree
+ * that the target platform installs. The JavaScript wrappers can be checked, and
+ * the binary is covered by being declared as a direct dependency above.
+ */
+function assertVoicePackagesResolve() {
+  // Resolve strictly inside the output directory. createRequire walks up the
+  // filesystem, so a probe rooted here would happily find the project's own
+  // node_modules and pass even with the package missing from the function — which
+  // is exactly the false negative that let this reach production.
+  const failures = [];
+  for (const name of ['tar-stream', 'unbzip2-stream']) {
+    const pkgDir = join(funcDir, 'node_modules', name, 'package.json');
+    if (!existsSync(pkgDir)) {
+      failures.push(`${name} is not present in the function's node_modules`);
+      continue;
+    }
+    try {
+      // Loading it proves the package works, not merely that it exists.
+      const entry = join(funcDir, 'node_modules', name, JSON.parse(readFileSync(pkgDir, 'utf8')).main ?? 'index.js');
+      const req = createRequire(entry);
+      if (!req(name)) failures.push(`${name} did not load`);
+    } catch (error) {
+      failures.push(`${name}: ${String(error.message).split('\n')[0]}`);
+    }
+  }
+
+  if (failures.length) {
+    console.error('\n  Voice packages do not resolve from the built function:');
+    for (const failure of failures) console.error(`    ${failure}`);
+    console.error('  Voice would fail on deploy. Fix this before deploying.');
+    process.exit(1);
+  }
+  console.log('  voice deps: tar-stream, unbzip2-stream present in the function');
+}
+
+assertVoicePackagesResolve();
 
 const after = dirSize(funcDir);
 console.log(`  before    : ${mb(before)} MB`);

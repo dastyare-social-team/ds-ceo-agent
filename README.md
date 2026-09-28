@@ -292,7 +292,7 @@ function never reads: 1130 sourcemaps (60MB) and 1053 type declarations (21MB)
 that ship because the deployer copies whole packages. Vercel's limit is 250MB, so
 there is room, but the headroom is better spent elsewhere.
 
-    npm run build:vercel
+    npm run build   # builds, trims, and asserts the voice packages
 
 `npm run build` runs the trim itself, so it cannot be skipped by a rebuild on Vercel. It brings the function to **118MB**. It removes only `.map` and `.d.ts` sidecars.
 

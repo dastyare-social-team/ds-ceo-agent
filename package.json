@@ -13,23 +13,32 @@
     "test": "node --env-file=.env --test test/*.test.ts",
     "webhook": "node scripts/set-webhook.mjs",
     "webhook:remove": "node scripts/set-webhook.mjs --remove",
-    "start": "mastra start"
+    "start": "mastra start",
+    "db:generate": "drizzle-kit generate",
+    "db:migrate": "drizzle-kit migrate",
+    "db:studio": "drizzle-kit studio"
   },
   "dependencies": {
+    "@aws-sdk/client-s3": "^3.1146.0",
+    "@aws-sdk/s3-request-presigner": "^3.1146.0",
     "@chat-adapter/telegram": "latest",
     "@mastra/core": "latest",
     "@mastra/deployer-vercel": "latest",
-    "@mastra/libsql": "latest",
     "@mastra/memory": "latest",
     "@mastra/pg": "^1.27.1",
     "@mastra/redis-streams": "latest",
     "@mastra/tavily": "latest",
     "@tavily/core": "latest",
     "@vercel/functions": "latest",
+    "drizzle-orm": "^0.45.3",
+    "pg": "^8.23.1",
+    "postgres": "^3.4.9",
     "zod": "latest"
   },
   "devDependencies": {
     "@types/node": "latest",
+    "@types/pg": "^8.23.1",
+    "drizzle-kit": "^0.31.11",
     "mastra": "latest",
     "typescript": "latest"
   },

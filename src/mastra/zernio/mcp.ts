@@ -23,8 +23,13 @@ const MCP_ENDPOINT = process.env.ZERNIO_MCP_URL ?? 'https://mcp.zernio.com/mcp';
 /** Generous next to the sub-second calls this makes, but finite. */
 const TIMEOUT_MS = 30_000;
 
-/** Published posts and scheduled posts are created here, and nowhere else. */
-type ZernioAccount = 'default';
+/**
+ * Which credential slot to authenticate with.
+ *
+ * A label rather than a fixed value, because Zernio keys are per workspace and the
+ * agent is meant to be told "use the agency workspace" and address it by name.
+ */
+export type ZernioAccount = string;
 
 export interface McpCallResult {
   /** Text content, which is where Zernio puts its human-readable reply. */

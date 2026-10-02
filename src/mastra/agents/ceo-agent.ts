@@ -7,6 +7,7 @@ import { waitUntil } from '@vercel/functions';
 import { env } from '../env.ts';
 import { createGuardedHandler } from '../guard.ts';
 import { assistantModel, openRouterReasoningOptions } from '../model.ts';
+import { publishingTools } from '../tools/publishing.ts';
 
 /**
  * Web search is only wired up when a Tavily key is present, so the agent boots
@@ -14,12 +15,12 @@ import { assistantModel, openRouterReasoningOptions } from '../model.ts';
  */
 const hasWebSearch = Boolean(env('TAVILY_API_KEY'));
 
-const tools: ToolsInput = hasWebSearch
-  ? {
-      webSearch: createTavilySearchTool(),
-      fetchPage: createTavilyExtractTool(),
-    }
-  : {};
+const tools: ToolsInput = {
+  ...(hasWebSearch
+    ? { webSearch: createTavilySearchTool(), fetchPage: createTavilyExtractTool() }
+    : {}),
+  ...publishingTools,
+};
 
 const TOOLING = hasWebSearch
   ? `You have two web tools:
@@ -44,6 +45,24 @@ Behaviour:
 - When you are uncertain, say so. Never invent citations, URLs, or numbers.
 - You remember previous turns in this chat, so you do not need the user to repeat context.`;
 
+/**
+ * Publishing rules.
+ *
+ * These duplicate the confirm gate on purpose. The gate in code is what makes the
+ * rule true; this is what makes the model *know* the rule, so it asks rather than
+ * trying and being refused. Belt and braces, because the cost of the gate firing
+ * mid-publish is a confusing turn and the cost of it not existing is a post to the
+ * wrong audience.
+ */
+const PUBLISHING = `Publishing to social accounts:
+
+- Nothing reaches a platform until the user has approved the exact caption and targets. Show the proposal, ask, wait.
+- propose-content records the proposal and returns an id. confirm-draft records the user's yes. Only then publish-approved will act.
+- Never call publish-approved with confirmedByUser true unless the user just said yes in this conversation.
+- Before proposing, call list-social-accounts to learn what is connected, and prepare-media to see which platforms the asset fits. Never suggest a platform the user has not connected.
+- Call recall-story before writing any caption. Draw the voice from those notes and say which note you used. Captions written from the model alone sound like a template.
+- If a media upload warns that the URL is not publicly fetchable, do not publish against it.`;
+
 export const ceoAgent = new Agent({
   id: 'ceo-agent',
   name: 'Dastyare Social — CEO Agent',
@@ -55,7 +74,7 @@ export const ceoAgent = new Agent({
    */
   model: assistantModel(),
   defaultOptions: openRouterReasoningOptions(),
-  instructions: `${instructions}\n\n${TOOLING}`,
+  instructions: `${instructions}\n\n${TOOLING}\n\n${PUBLISHING}`,
   memory: new Memory({
     options: {
       lastMessages: 20,

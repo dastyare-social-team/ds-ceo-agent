@@ -1,5 +1,14 @@
 import { sql } from 'drizzle-orm';
-import { boolean, index, integer, jsonb, pgTable, text, timestamp, uniqueIndex } from 'drizzle-orm/pg-core';
+import {
+  boolean,
+  index,
+  integer,
+  jsonb,
+  pgTable,
+  text,
+  timestamp,
+  uniqueIndex,
+} from 'drizzle-orm/pg-core';
 
 /**
  * Application-owned tables, separate from Mastra's.
@@ -19,12 +28,12 @@ import { boolean, index, integer, jsonb, pgTable, text, timestamp, uniqueIndex }
  * API keys change — a Zernio workspace key gets revoked and reissued, a Supabase
  * key pair gets rotated — so these are versioned rows rather than a single
  * mutable config row. A revoked key is kept as `revoked_at` so the audit trail
- * survives, and the current version is the newest non-revoked row per scope.
+ * survives, and the current version is the newest non-revoked row per slot.
  *
  * The ciphertext is `iv:authTag:ciphertext`, base64url each part, from
- * AES-256-GCM. `keyVersion` is here so the master key itself can be rotated
- * later without a data migration: old rows keep decrypting under the old
- * version until a background re-encrypt runs.
+ * AES-256-GCM. `key_version` is here so the master key itself can be rotated
+ * later without a data migration: old rows keep decrypting under the old version
+ * until a background re-encrypt runs.
  */
 export const credentials = pgTable(
   'app_credentials',
@@ -61,11 +70,12 @@ export const credentials = pgTable(
 );
 
 /**
- * A draft produced by the agent, awaiting the user's confirmation.
+ * A proposal produced by the agent, awaiting the user's confirmation.
  *
- * Nothing is ever published without a row here that the user has approved. The
- * draft holds the caption per platform and the Zernio draft post id, so "confirm"
- * is a lookup rather than a re-generation that might differ from what was shown.
+ * Nothing reaches Zernio without a row here that the user has approved. The
+ * draft holds the caption per platform, so "confirm" replays exactly what was
+ * shown rather than regenerating it — a caption that changes between approval
+ * and publish is worse than no automation at all.
  */
 export const contentDrafts = pgTable(
   'app_content_drafts',
@@ -79,14 +89,15 @@ export const contentDrafts = pgTable(
     mediaUrl: text('media_url'),
     /** Transcript or source text the caption was drafted from. */
     sourceText: text('source_text'),
-    /** Per-platform caption and options, as the agent proposed them. */
+    /** Per-platform caption and target, as the agent proposed them. */
     proposals: jsonb('proposals').notNull(),
-    /** Zernio draft post ids, once created. */
-    zernioDraftIds: jsonb('zernio_draft_ids'),
     status: text('status').notNull().default('awaiting_confirm'),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
     /** When the user approved. Null until they do. */
     confirmedAt: timestamp('confirmed_at', { withTimezone: true }),
+    /** Set once published, with Zernio's post ids. */
+    publishedAt: timestamp('published_at', { withTimezone: true }),
+    zernioPostIds: jsonb('zernio_post_ids'),
   },
   (table) => [index('app_content_drafts_chat_idx').on(table.chatId, table.createdAt)],
 );
@@ -95,11 +106,10 @@ export const contentDrafts = pgTable(
  * Mirror of Zernio's connected accounts.
  *
  * Cached because `accounts_list` is needed on nearly every publish decision and
- * the platform set changes only when a human reconnects something. The cache is
- * what lets the agent answer "where can I post?" without a network round trip,
- * and it is refreshed on demand rather than trusted blindly — Zernio is the
- * authority at publish time and a stale mirror must never be the reason a post
- * fails.
+ * the platform set changes only when a human reconnects something. The cache lets
+ * the agent answer "where can I post?" without a network round trip, but Zernio
+ * stays the authority at publish time and a stale mirror must never be the reason
+ * a post fails.
  */
 export const zernioAccounts = pgTable(
   'app_zernio_accounts',
@@ -124,6 +134,47 @@ export const zernioAccounts = pgTable(
   ],
 );
 
+/**
+ * The founder's own writing, indexed for retrieval.
+ *
+ * Captions should sound like him, not like a generic social-media template. The
+ * source is his Obsidian vault — `Story.md` is 25KB of first-person narrative,
+ * `Brand Voice.md` is 9KB of explicit do's and don'ts — and that is far better
+ * guidance than a prompt asking a model to "write in a friendly tone".
+ *
+ * Chunked rather than stored whole because retrieval returns excerpts: a 25KB
+ * story will not fit in a tool result, and the point is to quote the part that
+ * bears on the topic at hand.
+ *
+ * Embeddings are deliberately absent. Free embedding endpoints need a card, and
+ * this corpus is ~20 notes of distinctive, keyword-rich prose, so lexical
+ * retrieval scores well on it. `rank.ts` is the seam where a vector column would
+ * be added later without changing callers.
+ */
+export const storyChunks = pgTable(
+  'app_story_chunks',
+  {
+    id: text('id').primaryKey(),
+    /** Vault-relative path, so a citation points at a real note. */
+    source: text('source').notNull(),
+    /** Section heading inside the note, when the chunk came from one. */
+    heading: text('heading'),
+    /** Ordinal within the note, so ordering is stable across reindexes. */
+    ordinal: integer('ordinal').notNull(),
+    text: text('text').notNull(),
+    /** Term frequencies, for lexical scoring. */
+    terms: jsonb('terms').notNull(),
+    /**
+     * Higher outranks lower. The identity and voice notes matter most, because
+     * getting the tone wrong is worse than getting a detail wrong.
+     */
+    weight: integer('weight').notNull().default(1),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [index('app_story_chunks_source_idx').on(table.source)],
+);
+
 export type CredentialRow = typeof credentials.$inferSelect;
 export type ContentDraftRow = typeof contentDrafts.$inferSelect;
 export type ZernioAccountRow = typeof zernioAccounts.$inferSelect;
+export type StoryChunkRow = typeof storyChunks.$inferSelect;

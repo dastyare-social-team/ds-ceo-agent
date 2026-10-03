@@ -121,3 +121,44 @@ test('a command is answered without a thinking message', async () => {
   assert.equal(thread.sent.length, 1);
   assert.doesNotMatch(thread.sent[0].text, /Thinking/);
 });
+
+// --- unknown commands --------------------------------------------------------
+
+test('an unrecognised slash command is reported, not sent to the model', async () => {
+  const { createGuardedHandler } = await import('../src/mastra/guard.ts');
+  const posts: string[] = [];
+  let modelRan = false;
+  const thread = { post: async (m: string) => { posts.push(String(m)); return {}; } };
+
+  await createGuardedHandler('direct message')(
+    thread as never,
+    { text: '/publish now', author: { userId: '2063150861' }, attachments: [] } as never,
+    (async () => { modelRan = true; }) as never,
+    undefined as never,
+  );
+
+  assert.equal(modelRan, false, 'an unknown command must not reach the model');
+  assert.equal(posts.length, 1);
+  assert.match(posts[0], /Unknown command/i);
+  // The list is what makes the failure actionable.
+  assert.match(posts[0], /\/transcribe/);
+});
+
+test('a known command still runs and is not reported as unknown', async () => {
+  const { createGuardedHandler } = await import('../src/mastra/guard.ts');
+  const posts: string[] = [];
+  let modelRan = false;
+  const thread = { post: async (m: string) => { posts.push(String(m)); return {}; } };
+
+  await createGuardedHandler('direct message')(
+    thread as never,
+    { text: '/transcribe', author: { userId: '2063150861' }, attachments: [] } as never,
+    (async () => { modelRan = true; }) as never,
+    undefined as never,
+  );
+
+  assert.equal(modelRan, false);
+  assert.equal(posts.length, 1);
+  assert.match(posts[0], /Usage/i, '/transcribe with no URL should explain itself');
+  assert.equal(/Unknown command/.test(posts[0]), false);
+});

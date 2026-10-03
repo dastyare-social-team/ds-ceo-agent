@@ -102,6 +102,8 @@ export interface GuardOptions {
  * depending on Telegram transport mode or a live webhook.
  */
 const THINKING_LABEL = '🧠 Thinking';
+/** Listed when an unrecognised slash command arrives. */
+const KNOWN_COMMANDS = ['/new', '/clear', '/history', '/recall <n>', '/transcribe <url>'];
 const THINKING_TICK_MS = 5_000;
 
 /**
@@ -161,6 +163,28 @@ export function createGuardedHandler(
           else console.error(line);
           await thread.post(`Could not run /${command}. Try again in a moment.`);
         }
+        return;
+      }
+
+      /**
+       * A slash command the bot does not recognise is reported as unknown rather
+       * than passed to the model.
+       *
+       * This cost a whole diagnostic cycle: `/transcribe <url>` was sent while the
+       * build carrying it had not deployed, so it fell through as ordinary text.
+       * The model read the URL, reached for its web tools, failed on a binary file,
+       * and concluded — reasonably, from its own point of view — that no
+       * transcription capability existed. The real cause was a deployment lag that
+       * nothing in the reply could have revealed.
+       *
+       * An unknown command is the one case where the model is the wrong responder
+       * by definition: it has no way to know which commands this bot implements.
+       */
+      const raw = messageText(message).trim();
+      if (raw.startsWith('/')) {
+        await thread.post(
+          `Unknown command. Available: ${KNOWN_COMMANDS.join(', ')}`,
+        );
         return;
       }
 

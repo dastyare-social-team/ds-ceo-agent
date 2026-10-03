@@ -375,3 +375,20 @@ test('a command that is only a prefix is not swallowed', async () => {
   assert.equal(parseChatCommand('/transcriptions'), null);
   assert.equal(parseChatCommand('/transcribable'), null);
 });
+
+// --- unknown commands --------------------------------------------------------
+
+test('a command this bot does not implement is not a valid command', async () => {
+  const { parseChatCommand } = await import('../src/mastra/commands.ts');
+  // These fall through as unknown, which the guard now reports instead of
+  // forwarding to the model.
+  assert.equal(parseChatCommand('/publish now'), null);
+  assert.equal(parseChatCommand('/telegram'), null);
+  assert.equal(parseChatCommand('/help'), null);
+});
+
+test('a URL on its own is ordinary text, not a command', async () => {
+  const { parseChatCommand } = await import('../src/mastra/commands.ts');
+  // Starts with https, not a slash, so it must reach the model normally.
+  assert.equal(parseChatCommand('https://example.com/a.mp4'), null);
+});

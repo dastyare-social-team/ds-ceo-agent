@@ -335,3 +335,43 @@ test('an ordinary message still reaches the model', async () => {
   assert.equal(posted.length, 1);
   assert.match(posted[0], /Thinking/);
 });
+
+// --- /transcribe -------------------------------------------------------------
+
+test('/transcribe is recognised with a URL argument', async () => {
+  const { parseChatCommand } = await import('../src/mastra/commands.ts');
+  const parsed = parseChatCommand('/transcribe https://example.com/a.mp4');
+  assert.equal(parsed?.command, 'transcribe');
+  assert.equal(parsed?.arg, 'https://example.com/a.mp4');
+});
+
+test('/transcribe rejects a non-https argument before spending a credit', async () => {
+  const { transcribeFromUrl } = await import('../src/mastra/commands.ts');
+  // Speechmatics bills per minute, so a malformed argument must fail before the
+  // file is fetched and a job submitted.
+  const missing = await transcribeFromUrl('');
+  assert.equal(missing.ok, false);
+  assert.match(missing.reply, /Usage/i);
+
+  const insecure = await transcribeFromUrl('http://example.com/a.mp4');
+  assert.equal(insecure.ok, false);
+  assert.match(insecure.reply, /https/i);
+
+  const notAUrl = await transcribeFromUrl('just some words');
+  assert.equal(notAUrl.ok, false);
+});
+
+test('/transcribe takes only the first token, so trailing words are harmless', async () => {
+  const { parseChatCommand } = await import('../src/mastra/commands.ts');
+  const parsed = parseChatCommand('/transcribe https://example.com/a.mp4 please');
+  assert.equal(parsed?.arg, 'https://example.com/a.mp4 please');
+  // The handler splits on whitespace, so the URL is recovered regardless.
+  const first = parsed!.arg.trim().split(/\s+/)[0];
+  assert.equal(first, 'https://example.com/a.mp4');
+});
+
+test('a command that is only a prefix is not swallowed', async () => {
+  const { parseChatCommand } = await import('../src/mastra/commands.ts');
+  assert.equal(parseChatCommand('/transcriptions'), null);
+  assert.equal(parseChatCommand('/transcribable'), null);
+});

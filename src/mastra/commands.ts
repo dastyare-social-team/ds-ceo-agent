@@ -20,7 +20,7 @@ import { storage } from './db.ts';
  * only route that works through the documented storage API.
  */
 
-export type ChatCommandName = 'new' | 'history' | 'recall';
+export type ChatCommandName = 'new' | 'history' | 'recall' | 'transcribe';
 
 export interface ParsedCommand {
   command: ChatCommandName;
@@ -35,6 +35,8 @@ const COMMANDS: readonly { command: ChatCommandName; pattern: RegExp }[] = [
   { command: 'new', pattern: /^\/new\b/i },
   { command: 'new', pattern: /^\/clear\b/i },
   { command: 'history', pattern: /^\/history\b/i },
+  // Takes a URL argument: the diagnostic path for video transcription.
+  { command: 'transcribe', pattern: /^\/transcribe\b\s*(.*)$/i },
 ];
 
 export function parseChatCommand(text: string | undefined | null): ParsedCommand | null {
@@ -44,7 +46,13 @@ export function parseChatCommand(text: string | undefined | null): ParsedCommand
     const match = pattern.exec(value);
     if (!match) continue;
     // A word boundary still allows a trailing query, e.g. "/history?x".
-    if (command === 'recall') return { command, arg: (match[1] ?? '').trim() };
+    // `/recall` and `/transcribe` are the commands that take an argument, so the
+    // capture group is only meaningful for those. Restricting it to them rather
+    // than reading match[1] for every command is deliberate: the others have no
+    // argument, and an empty one is the honest answer.
+    if (command === 'recall' || command === 'transcribe') {
+      return { command, arg: (match[1] ?? '').trim() };
+    }
     return { command, arg: '' };
   }
   return null;
@@ -251,4 +259,57 @@ export async function chatHistory(resourceId: string): Promise<NewChatResult> {
     ok: true,
     reply: `Archived sessions (${archives.length}):\n${lines.join('\n')}\n\nSend /recall <number> to continue an old conversation.`,
   };
+}
+
+/**
+ * Transcribes a video from a public URL and reports the result verbatim.
+ *
+ * A slash command rather than a tool on purpose. When video transcription is
+ * misconfigured, the agent cannot be the thing that tells you so: it has no way to
+ * distinguish "the tool is missing" from "the tool failed", so it answers the
+ * question it can answer — asking for a description — and the actual error never
+ * surfaces. This runs the same code path and returns the raw outcome, including
+ * the HTTP status, which is the difference between diagnosing a bad key, an
+ * unreachable host and a wrong content type.
+ */
+export async function transcribeFromUrl(rawUrl: string): Promise<{ ok: boolean; reply: string }> {
+  const url = (rawUrl ?? '').trim().split(/\s+/)[0] ?? '';
+  if (!url) {
+    return { ok: false, reply: 'Usage: /transcribe <public-url>' };
+  }
+  if (!/^https:\/\//i.test(url)) {
+    return { ok: false, reply: 'That does not look like an https URL.' };
+  }
+
+  try {
+    const response = await fetch(url, { signal: AbortSignal.timeout(120_000) });
+    if (!response.ok) {
+      return {
+        ok: false,
+        reply: `Could not fetch the video: HTTP ${response.status}. Check the URL is public.`,
+      };
+    }
+    const bytes = new Uint8Array(await response.arrayBuffer());
+
+    const { transcribeMedia } = await import('./transcribe/speechmatics.ts');
+    const outcome = await transcribeMedia(bytes, {
+      kind: 'video',
+      fileName: url.split('/').pop() ?? null,
+    });
+
+    if (outcome.ok && outcome.transcript) {
+      const { durationSeconds, language, jobId } = outcome.transcript;
+      return {
+        ok: true,
+        reply: [
+          `Transcribed ${durationSeconds ?? '?'}s${language ? ` (${language})` : ''}. Job ${jobId}.`,
+          '',
+          outcome.transcript.text,
+        ].join('\n'),
+      };
+    }
+    return { ok: false, reply: `Not transcribed. ${outcome.message}` };
+  } catch (error) {
+    return { ok: false, reply: `Transcription failed: ${String((error as Error)?.message ?? error)}` };
+  }
 }

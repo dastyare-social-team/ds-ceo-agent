@@ -8,7 +8,13 @@ import {
   rejectDraft,
   summariseDraft,
 } from './approve.ts';
-import { chatHistory, parseChatCommand, recallSession, startNewChat } from './commands.ts';
+import {
+  chatHistory,
+  parseChatCommand,
+  recallSession,
+  startNewChat,
+  transcribeFromUrl,
+} from './commands.ts';
 import type { SentMessageLike } from './processors/progress-types.ts';
 import { isVoiceMessage, transcribeVoice, withTranscript } from './voice.ts';
 import {
@@ -143,7 +149,9 @@ export function createGuardedHandler(
               ? await startNewChat(memoryResourceId(thread))
               : command === 'recall'
                 ? await recallSession(memoryResourceId(thread), arg)
-                : await chatHistory(memoryResourceId(thread));
+                : command === 'transcribe'
+                  ? await transcribeFromUrl(arg)
+                  : await chatHistory(memoryResourceId(thread));
           await thread.post(result.reply);
         } catch (error) {
           const logger = ctx?.mastra?.getLogger?.();

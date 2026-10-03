@@ -191,7 +191,10 @@ export const publishMedia = createTool({
   description:
     'Upload media to storage so Zernio can fetch it, and return a public URL. Zernio requires a publicly ' +
     'reachable HTTPS URL and fetches it server-side at publish time, which is what allows a post to be ' +
-    'scheduled rather than uploaded through a browser.',
+    'scheduled rather than uploaded through a browser. ' +
+    'NOTE: this exists only for media the bot does not already hold. Anything the user sends in Telegram is ' +
+    'uploaded automatically on arrival and its URL is already in the conversation — do not call this for that, ' +
+    'and never ask the user to paste base64, which cannot fit in a message.',
   inputSchema: z.object({
     kind: z.enum(['video', 'image', 'gif', 'document']),
     /** Base64 or data URL of the bytes, as read from the Telegram attachment. */

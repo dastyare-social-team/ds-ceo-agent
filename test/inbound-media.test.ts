@@ -34,13 +34,28 @@ test('audio is not media — voice is transcribed on its own path', () => {
   assert.equal(mediaKindOf(withAttachment('audio')), undefined);
 });
 
-test('a caption alongside media is left to the normal text path', () => {
-  // The caption is the message; uploading the attachment would ignore it.
-  assert.equal(isMediaMessage(withAttachment('video', {})), true);
+test('media is recognised even with a caption', () => {
+  // Sending a video with a one-line caption is how people normally send one.
+  // Treating that as "just text" meant the file was never uploaded and the model
+  // only saw an [Attached file: …] placeholder.
   assert.equal(
     isMediaMessage({ ...withAttachment('video'), text: 'caption for this' }),
-    false,
+    true,
   );
+  assert.equal(
+    isMediaMessage({ ...withAttachment('image'), text: 'look at this' }),
+    true,
+  );
+});
+
+test('the caption the user wrote is kept, and placed before the upload notice', () => {
+  const handed = withMediaSummary(
+    { ...withAttachment('video'), text: 'my caption' },
+    'UPLOAD NOTICE',
+    'video',
+  ) as { text: string };
+  assert.match(handed.text, /^my caption/);
+  assert.ok(handed.text.includes('UPLOAD NOTICE'));
 });
 
 test('plain text and attachments without a fetch function are not media', () => {

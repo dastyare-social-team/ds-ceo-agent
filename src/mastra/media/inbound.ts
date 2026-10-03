@@ -103,9 +103,21 @@ export interface InboundMedia {
  * Audio is excluded on purpose: voice is transcribed, not uploaded, and that path
  * already exists in voice.ts.
  */
+/**
+ * True for a message carrying video, an image or a document — *with or without* a
+ * caption.
+ *
+ * The caption used to disqualify the message, on the reasoning that a captioned
+ * attachment is "just text" and the caption is the message. That is wrong in
+ * practice: sending a video with a one-line caption is how people normally send
+ * one, so the media was silently never uploaded and the model received an
+ * `[Attached file: …]` placeholder instead. The bot then reported it could not see
+ * the file and asked for base64, which is not a workable answer for 8MB.
+ *
+ * A caption is content and the media is publishable content; both are handled.
+ */
 export function isMediaMessage(message: unknown): boolean {
   const m = message as { text?: unknown; attachments?: unknown };
-  if (typeof m?.text === 'string' && m.text.trim().length > 0) return false;
   const attachments = (m?.attachments ?? []) as InboundAttachment[];
   return attachments.some(
     (a) => kindForAttachment(a) !== undefined && typeof a?.fetchData === 'function',
@@ -201,11 +213,17 @@ export function withMediaSummary(
   summary: string,
   publishedKind?: InboundKind,
 ): unknown {
-  const original = (message ?? {}) as { attachments?: unknown };
+  const original = (message ?? {}) as { attachments?: unknown; text?: unknown };
   const attachments = (original.attachments ?? []) as InboundAttachment[];
+
+  // A caption the user wrote is kept and placed first, because it is what they
+  // actually typed. Dropping it in favour of the upload notice would throw away
+  // the one piece of intent that came from them rather than from the pipeline.
+  const caption = typeof original.text === 'string' ? original.text.trim() : '';
+
   return {
     ...original,
-    text: summary,
+    text: caption ? `${caption}\n\n${summary}` : summary,
     attachments: publishedKind
       ? attachments.filter((a) => kindForAttachment(a) !== publishedKind)
       : attachments,

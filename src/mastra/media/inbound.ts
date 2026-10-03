@@ -1,4 +1,5 @@
 import { uploadMedia, verifyPublicUrl, type MediaKind } from './storage.ts';
+import { compressIfOversized } from './compress.ts';
 
 /**
  * Inbound media from Telegram: video, image, document.
@@ -88,7 +89,12 @@ export interface InboundAttachment {
 
 export interface InboundMedia {
   kind: InboundKind;
+  /** Size actually uploaded, after any compression. */
   bytes: number;
+  /** Size as received, so a compressed upload can say so. */
+  originalBytes: number;
+  /** True when the file was transcoded before upload. */
+  compressed: boolean;
   fileName: string | null;
   /** Public HTTPS URL Zernio will fetch at publish time. */
   url: string;
@@ -153,15 +159,28 @@ export async function publishInboundMedia(message: unknown): Promise<InboundMedi
   if (!attachment?.fetchData) throw new Error('No video, image or document on the message');
 
   const kind = kindForAttachment(attachment)!;
-  const bytes = await toBytes(await attachment.fetchData());
-  if (bytes.byteLength === 0) throw new Error('The uploaded file was empty');
+  const raw = await toBytes(await attachment.fetchData());
+  if (raw.byteLength === 0) throw new Error('The uploaded file was empty');
+
+  /**
+   * Oversized video is transcoded before upload. Storage refuses anything above
+   * its ceiling, and that refusal reaches the user as a bare "could not upload"
+   * with no way forward — re-sending the same file fails identically.
+   */
+  const { bytes, compressed, originalBytes, note } = await compressIfOversized(raw, attachment.name ?? null);
 
   const stored = await uploadMedia(bytes, kind as MediaKind);
+  if (note) {
+    // Surfaced rather than logged, because it explains a size the user did not send.
+    console.warn(`[media] ${note}`);
+  }
   const check = await verifyPublicUrl(stored.url);
 
   return {
     kind,
     bytes: bytes.byteLength,
+    originalBytes,
+    compressed,
     fileName: attachment.name ?? null,
     url: stored.url,
     width: attachment.width ?? null,

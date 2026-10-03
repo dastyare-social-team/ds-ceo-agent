@@ -22,6 +22,7 @@
     "@aws-sdk/client-s3": "^3.1146.0",
     "@aws-sdk/s3-request-presigner": "^3.1146.0",
     "@chat-adapter/telegram": "latest",
+    "@ffmpeg-installer/ffmpeg": "^1.1.0",
     "@mastra/core": "latest",
     "@mastra/deployer-vercel": "latest",
     "@mastra/memory": "latest",
@@ -44,5 +45,8 @@
   },
   "engines": {
     "node": ">=22.18.0"
+  },
+  "optionalDependencies": {
+    "@ffmpeg-installer/linux-x64": "^1.1.0"
   }
 }

@@ -25,7 +25,7 @@
  *
  *   - JavaScript source files. Only the .map and .d.ts sidecars go.
  */
-import { existsSync, readFileSync, readdirSync, rmSync, statSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 
 const funcDir = resolve(process.argv[2] ?? '.vercel/output/functions/index.func');
@@ -83,6 +83,57 @@ function pruneFiles(root, predicate) {
 }
 
 const nodeModules = join(funcDir, 'node_modules');
+
+/**
+ * The ffmpeg binary must be declared in the output package.json.
+ *
+ * The Mastra deployer writes its own dependency list from what it can see the app
+ * import, and the ffmpeg binary is referenced by path string rather than imported,
+ * so it is invisible to that scan and does not get installed. The failure mode is
+ * silent: compression reports itself unavailable and every oversized video is
+ * passed through to storage, which then refuses it with "file is too big" and no
+ * explanation. Vercel is linux-x64 and installs the optional dependency; this
+ * machine is arm64 and skips it.
+ */
+// Both are needed: the wrapper resolves the platform, the linux package carries
+// the binary. The wrapper is invisible to the deployer's import scan because it
+// is reached through createRequire rather than a static import.
+const FFMPEG_WRAPPER = '@ffmpeg-installer/ffmpeg';
+const FFMPEG_LINUX = '@ffmpeg-installer/linux-x64';
+const outputPkgPath = join(funcDir, 'package.json');
+if (existsSync(outputPkgPath)) {
+  const pkg = JSON.parse(readFileSync(outputPkgPath, 'utf8'));
+  // The version comes from the app's own package.json, not from node_modules.
+  // The linux package is an optional dependency that arm64 never installs, so
+  // looking for it locally finds nothing and skips the declaration — which is
+  // precisely the deploy where it is needed.
+  const version = (() => {
+    try {
+      const app = JSON.parse(readFileSync(join(process.cwd(), 'package.json'), 'utf8'));
+      const declared =
+        app.optionalDependencies?.[FFMPEG_LINUX] ?? app.dependencies?.[FFMPEG_LINUX];
+      return declared ? declared.replace(/^[~^]/, '') : null;
+    } catch {
+      return null;
+    }
+  })();
+  const app = JSON.parse(readFileSync(join(process.cwd(), 'package.json'), 'utf8'));
+  const pick = (name) =>
+    (app.optionalDependencies?.[name] ?? app.dependencies?.[name])?.replace(/^[~^]/, '');
+
+  const wrapper = pick(FFMPEG_WRAPPER);
+  const linux = version ?? pick(FFMPEG_LINUX);
+  if (wrapper || linux) {
+    pkg.dependencies = { ...(pkg.dependencies ?? {}) };
+    if (wrapper) pkg.dependencies[FFMPEG_WRAPPER] = `^${wrapper}`;
+    if (linux) pkg.dependencies[FFMPEG_LINUX] = `^${linux}`;
+    writeFileSync(outputPkgPath, `${JSON.stringify(pkg, null, 2)}\n`);
+    const parts = [wrapper && `${FFMPEG_WRAPPER}@${wrapper}`, linux && `${FFMPEG_LINUX}@${linux}`];
+    console.log(`  declared : ${parts.filter(Boolean).join(', ')} (installed on the deploy host)`);
+  } else {
+    console.log('  note     : ffmpeg not declared in package.json, so the deploy host has no binary');
+  }
+}
 
 // Sourcemaps. Only read by a debugger attaching to a stack trace.
 const maps = pruneFiles(nodeModules, (name) => name.endsWith('.map'));

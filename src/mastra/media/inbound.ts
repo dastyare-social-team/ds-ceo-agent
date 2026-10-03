@@ -20,12 +20,61 @@ import { uploadMedia, verifyPublicUrl, type MediaKind } from './storage.ts';
 
 export type InboundKind = 'video' | 'image' | 'document';
 
-/** Adapter attachment types that carry publishable media. */
-const KIND_BY_TYPE: Record<string, InboundKind> = {
-  video: 'video',
-  image: 'image',
-  document: 'document',
-};
+/**
+ * Adapter attachment types that can carry publishable media.
+ *
+ * `file` matters as much as `video`: the Telegram adapter types a *document* as
+ * `file`, not `document`, so an .mp4 sent the way a person naturally sends one —
+ * as a File/Document, which is also what you are told to do when an upload fails —
+ * arrived typed `file` and was not recognised at all. The message then fell
+ * through to the model as an `[Attached file: …]` placeholder, and the model
+ * reported it could not see the bytes. That is a self-reinforcing loop: ask the
+ * user to resend as a document, fail to recognise the document, ask again.
+ *
+ * `voice_note` and `animation` are typed `video` by the adapter, so they arrive
+ * here too; a round video is handled like any other video.
+ */
+/**
+ * Attachment types the adapter produces that are never publishable media here.
+ *
+ * `audio` is the important one: voice is transcribed on its own path, and letting
+ * a filename override the adapter's label would route a voice note into the
+ * upload pipeline. `sticker` is an image by mime type but is not a photo anyone
+ * sent to be posted.
+ */
+const NOT_MEDIA = new Set(['audio', 'voice', 'sticker', 'animation']);
+
+/**
+ * Resolves an attachment to a publishable kind.
+ *
+ * The adapter's label wins whenever it is meaningful. A Telegram *document* is
+ * typed `file` and says nothing useful about its contents, so that one is resolved
+ * from the mime type and then the extension — Zernio infers the media type from
+ * the URL extension and rejects a contradiction with a 400, so a mislabelled kind
+ * would upload an .mp4 as a .pdf and fail at the far end of the publish pipeline.
+ */
+export function kindForAttachment(attachment: InboundAttachment): InboundKind | undefined {
+  const type = attachment?.type ?? '';
+
+  if (NOT_MEDIA.has(type)) return undefined;
+  if (type === 'video') return 'video';
+  if (type === 'image') return 'image';
+  if (type === 'document') return 'document';
+
+  // `file`, or anything unrecognised: fall back to content signals.
+  const mime = (attachment?.mimeType ?? '').toLowerCase();
+  if (mime.startsWith('video/')) return 'video';
+  if (mime.startsWith('image/')) return 'image';
+
+  const name = (attachment?.name ?? '').toLowerCase();
+  if (/\.(mp4|mov|avi|webm|m4v|mkv)$/.test(name)) return 'video';
+  if (/\.(jpe?g|png|webp|gif)$/.test(name)) return 'image';
+  if (mime.startsWith('application/pdf') || name.endsWith('.pdf')) return 'document';
+
+  // An unrecognised `file` still uploads: better to show the user a result than
+  // to report a failure and send them round the loop again.
+  return type === 'file' ? 'document' : undefined;
+}
 
 export interface InboundAttachment {
   type?: string;
@@ -59,13 +108,13 @@ export function isMediaMessage(message: unknown): boolean {
   if (typeof m?.text === 'string' && m.text.trim().length > 0) return false;
   const attachments = (m?.attachments ?? []) as InboundAttachment[];
   return attachments.some(
-    (a) => (a?.type ?? '') in KIND_BY_TYPE && typeof a?.fetchData === 'function',
+    (a) => kindForAttachment(a) !== undefined && typeof a?.fetchData === 'function',
   );
 }
 
 export function mediaKindOf(message: unknown): InboundKind | undefined {
   const attachments = ((message as { attachments?: unknown })?.attachments ?? []) as InboundAttachment[];
-  return attachments.find((a) => (a?.type ?? '') in KIND_BY_TYPE)?.type as InboundKind | undefined;
+  return attachments.map((a) => kindForAttachment(a)).find((k) => k !== undefined);
 }
 
 async function toBytes(data: unknown): Promise<Uint8Array> {
@@ -86,10 +135,12 @@ async function toBytes(data: unknown): Promise<Uint8Array> {
  */
 export async function publishInboundMedia(message: unknown): Promise<InboundMedia> {
   const attachments = ((message as { attachments?: unknown })?.attachments ?? []) as InboundAttachment[];
-  const attachment = attachments.find((a) => (a?.type ?? '') in KIND_BY_TYPE && a?.fetchData);
+  const attachment = attachments.find(
+    (a) => kindForAttachment(a) !== undefined && a?.fetchData,
+  );
   if (!attachment?.fetchData) throw new Error('No video, image or document on the message');
 
-  const kind = attachment.type as InboundKind;
+  const kind = kindForAttachment(attachment)!;
   const bytes = await toBytes(await attachment.fetchData());
   if (bytes.byteLength === 0) throw new Error('The uploaded file was empty');
 
@@ -156,7 +207,7 @@ export function withMediaSummary(
     ...original,
     text: summary,
     attachments: publishedKind
-      ? attachments.filter((a) => a?.type !== publishedKind)
+      ? attachments.filter((a) => kindForAttachment(a) !== publishedKind)
       : attachments,
   };
 }

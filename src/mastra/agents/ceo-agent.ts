@@ -5,7 +5,7 @@ import { createTelegramAdapter } from '@chat-adapter/telegram';
 import { createTavilySearchTool, createTavilyExtractTool } from '@mastra/tavily';
 import { waitUntil } from '@vercel/functions';
 import { env } from '../env.ts';
-import { createGuardedHandler } from '../guard.ts';
+import { createGuardedActionHandler, createGuardedHandler } from '../guard.ts';
 import { assistantModel, openRouterReasoningOptions } from '../model.ts';
 import { publishingTools } from '../tools/publishing.ts';
 
@@ -120,6 +120,12 @@ export const ceoAgent = new Agent({
       onSubscribedMessage: createGuardedHandler('subscribed-thread message', {
         notifySender: false,
       }),
+      /**
+       * Inline button presses. Routed through the same allowlist as messages: a
+       * card posted into a group stays visible there, so anyone who can see the
+       * Approve button must not be able to publish with it.
+       */
+      onAction: createGuardedActionHandler(),
     },
     // Vercel freezes the function as soon as the webhook 200s. waitUntil keeps
     // the instance alive until the agent has posted its reply. It is a no-op

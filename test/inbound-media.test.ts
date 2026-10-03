@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
   describeInboundMedia,
+  kindForAttachment,
   isMediaMessage,
   mediaKindOf,
   withMediaSummary,
@@ -151,4 +152,54 @@ test('a confirmed unpublish is preferred over delete in the guidance', () => {
   // The irreversible option has to be described as irreversible, or the agent
   // will pick it whenever the goal is merely "take this down".
   assert.match(description, /cannot be undone|permanently/i);
+});
+
+// --- the loop that was stuck ------------------------------------------------
+// A Telegram document is typed `file` by the adapter, not `document`. Failing to
+// recognise it meant: ask the user to send a Document, ignore the Document, ask
+// again. These pin the cases that reproduce it.
+
+test('a video sent as a Document is recognised as media', () => {
+  const asDocument = {
+    text: '',
+    attachments: [
+      { type: 'file', name: 'IMG_2515.MP4', mimeType: 'video/mp4', fetchData: async () => new Uint8Array([1]) },
+    ],
+  };
+  assert.equal(isMediaMessage(asDocument), true, 'a Document carrying a video must not be ignored');
+  assert.equal(mediaKindOf(asDocument), 'video');
+});
+
+test('a Document is still recognised when Telegram reports no useful mime type', () => {
+  // application/octet-stream and a missing mime type are both common; the
+  // extension is the only signal left, and without it the file still uploads.
+  assert.equal(kindForAttachment({ type: 'file', name: 'clip.mp4' }), 'video');
+  assert.equal(kindForAttachment({ type: 'file', name: 'photo.png' }), 'image');
+  assert.equal(kindForAttachment({ type: 'file', name: 'doc.pdf' }), 'document');
+  assert.equal(kindForAttachment({ type: 'file', name: 'mystery' }), 'document');
+});
+
+test('an image Document resolves to image, not document', () => {
+  assert.equal(kindForAttachment({ type: 'file', mimeType: 'image/png' }), 'image');
+  assert.equal(kindForAttachment({ type: 'file', mimeType: 'image/gif' }), 'image');
+  assert.equal(kindForAttachment({ type: 'video', mimeType: 'video/mp4' }), 'video');
+});
+
+test('a sticker is not treated as publishable media', () => {
+  // A sticker has an image mime type but is not a photo the user sent to post.
+  assert.equal(kindForAttachment({ type: 'sticker', mimeType: 'image/webp' }), undefined);
+  assert.equal(isMediaMessage({ text: '', attachments: [{ type: 'sticker', fetchData: async () => new Uint8Array([1]) }] }), false);
+});
+
+test('dropping the published kind also drops a Document of that kind', () => {
+  const message = {
+    text: '',
+    attachments: [
+      { type: 'file', name: 'v.mp4', mimeType: 'video/mp4', fetchData: async () => new Uint8Array([1]) },
+      { type: 'image', name: 'cover.jpg', fetchData: async () => new Uint8Array([2]) },
+    ],
+  };
+  const handed = withMediaSummary(message, 'summary', 'video') as { attachments: { type: string }[] };
+  // The Document goes, the cover photo stays: an image is genuinely viewable.
+  assert.deepEqual(handed.attachments.map((a) => a.type), ['image']);
 });

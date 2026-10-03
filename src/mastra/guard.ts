@@ -1,5 +1,13 @@
 import type { ChannelHandler, ChannelHandlerContext } from '@mastra/core/channels';
 import { isAllowedUser, REJECTION_NOTICE } from './access.ts';
+import {
+  APPROVE_ACTION,
+  REJECT_ACTION,
+  approvalCard,
+  pendingDraftFor,
+  rejectDraft,
+  summariseDraft,
+} from './approve.ts';
 import { chatHistory, parseChatCommand, recallSession, startNewChat } from './commands.ts';
 import type { SentMessageLike } from './processors/progress-types.ts';
 import { isVoiceMessage, transcribeVoice, withTranscript } from './voice.ts';
@@ -256,6 +264,26 @@ export function createGuardedHandler(
       } catch {
         // The channel may refuse or the message may already be gone.
       }
+
+      /**
+       * If the agent left a proposal waiting, offer it as buttons.
+       *
+       * Posted after the reply rather than before it, so the card appears under
+       * the explanation of what is being published. Tapping Approve is a discrete
+       * event carrying the draft id, which is a far stronger signal than parsing
+       * free text for a confirmation — and it is the same confirmed_at write, so
+       * the gate in publish-approved is unchanged.
+       */
+      try {
+        const pending = await pendingDraftFor(memoryResourceId(thread));
+        if (pending) {
+          await thread.post(approvalCard(pending.id, summariseDraft(pending.proposals)));
+        }
+      } catch (error) {
+        // Never fail a reply because the card could not be attached. The user can
+        // still approve in words, and publish-approved still requires confirmation.
+        ctx?.mastra?.getLogger?.().warn(`[approve] could not post card: ${String(error)}`);
+      }
       return;
     }
 
@@ -265,4 +293,80 @@ export function createGuardedHandler(
       await thread.post(REJECTION_NOTICE);
     }
   };
+}
+
+/**
+ * Handles a button tap.
+ *
+ * Mastra routes inline-keyboard presses here through the channel's `onAction`, so
+ * an approval is a discrete event carrying the id of the exact draft it applies
+ * to, rather than a phrase in free text that has to be interpreted.
+ *
+ * The allowlist is checked here for the same reason as on messages: a card posted
+ * into a group stays there, and anyone who can see the buttons must not be able to
+ * approve someone else's post.
+ */
+interface ActionEvent {
+  actionId: string;
+  value?: string;
+  threadId?: string;
+  thread?: {
+    author?: { userId?: string | number };
+    post?: (message: unknown) => Promise<unknown>;
+  } | null;
+}
+
+export function createGuardedActionHandler() {
+  return async (event: unknown, defaultHandler: () => Promise<void>) => {
+    const { actionId, value, thread } = event as ActionEvent;
+    const userId = thread?.author?.userId;
+    if (!isAllowedUser(userId)) {
+      logBlocked('button action' as never, 'unauthorised telegram user', userId === undefined ? undefined : String(userId));
+      return;
+    }
+
+    const draftId = value;
+    if (!draftId) {
+      // Not one of our cards, or the payload was lost. Let the default handler
+      // deal with it rather than silently doing nothing.
+      await defaultHandler();
+      return;
+    }
+
+    if (actionId === REJECT_ACTION) {
+      const rejected = await rejectDraft(draftId);
+      await thread?.post?.(
+        rejected ? 'Cancelled. Nothing was published.' : 'That draft is no longer pending.',
+      );
+      return;
+    }
+
+    if (actionId === APPROVE_ACTION) {
+      await thread?.post?.(await publishApprovedFor(draftId));
+      return;
+    }
+
+    await defaultHandler();
+  };
+}
+
+/** Confirms then publishes, reporting what happened in one message. */
+async function publishApprovedFor(draftId: string): Promise<string> {
+  const { confirmDraft, publishApproved } = await import('./tools/publishing.ts');
+  const ctx = {} as never;
+  const confirmed = (await confirmDraft.execute!({ draftId }, ctx)) as { confirmed: boolean };
+  if (!confirmed.confirmed) return 'This draft is no longer pending, so nothing was published.';
+
+  const outcome = (await publishApproved.execute!({ draftId, confirmedByUser: true }, ctx)) as {
+    published: boolean;
+    results?: { platform: string; text: string; isError: boolean }[];
+  };
+
+  if (outcome.published) return 'Published.';
+
+  const failures = (outcome.results ?? [])
+    .filter((r) => r.isError)
+    .map((r) => `${r.platform}: ${r.text}`)
+    .join('\n');
+  return `Not published.\n${failures || 'No detail was returned by Zernio.'}`;
 }

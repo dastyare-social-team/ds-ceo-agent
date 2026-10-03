@@ -180,3 +180,42 @@ test.after(async () => {
   await db.delete(contentDrafts);
   await closeDb();
 });
+// --- approval buttons --------------------------------------------------------
+
+test('the approval card carries the draft id on both buttons', async () => {
+  const { approvalCard, APPROVE_ACTION, REJECT_ACTION } = await import('../src/mastra/approve.ts');
+  const card = approvalCard('draft-42', '2 posts to LinkedIn, Telegram');
+  const actions = card.children.find((c) => c.type === 'actions');
+  assert.ok(actions, 'the card must carry buttons');
+  assert.equal(actions.children.length, 2);
+
+  const ids = actions.children.map((b) => b.id);
+  assert.ok(ids.includes(APPROVE_ACTION));
+  assert.ok(ids.includes(REJECT_ACTION));
+
+  // The value is what makes a tap unambiguous: it names the exact draft, so a tap
+  // cannot be misread as approval of some later proposal in the same chat.
+  for (const button of actions.children) {
+    assert.equal(button.value, 'draft-42');
+  }
+});
+
+test('a rejected draft stops being offered', async () => {
+  const { rejectDraft, pendingDraftFor } = await import('../src/mastra/approve.ts');
+  const { draftId } = (await proposeContent.execute!(
+    { chatId: CHAT, mediaKind: 'text', proposals: [{ platform: 'telegram', caption: 'c' }] },
+    {},
+  )) as { draftId: string };
+
+  assert.ok(await pendingDraftFor(CHAT), 'a fresh proposal must be pending');
+  assert.equal(await rejectDraft(draftId), true);
+
+  const stillPending = await pendingDraftFor(CHAT);
+  assert.ok(
+    !stillPending || stillPending.id !== draftId,
+    'a cancelled draft must not be offered for approval again',
+  );
+  assert.equal(await rejectDraft('does-not-exist'), false);
+
+  await db.delete(contentDrafts).where(eq(contentDrafts.id, draftId));
+});

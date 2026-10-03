@@ -11,7 +11,13 @@ import {
 } from '../db/client.ts';
 import { contentDrafts } from '../db/schema.ts';
 import { formatExcerpts, retrieveStory } from '../story/retrieve.ts';
-import { publishPost, listConnectedAccounts } from '../zernio/mcp.ts';
+import {
+  deletePost,
+  listConnectedAccounts,
+  listPosts,
+  publishPost,
+  unpublishPost,
+} from '../zernio/mcp.ts';
 import { uploadMedia, verifyPublicUrl, type MediaKind } from '../media/storage.ts';
 import {
   captionWarnings,
@@ -203,6 +209,57 @@ export const publishMedia = createTool({
         ? undefined
         : `Zernio will not be able to fetch this URL (HTTP ${check.status}). Do not publish against it.`,
     };
+  },
+});
+
+// --- reading and removing what is already published -------------------------
+
+export const listPublishedPosts = createTool({
+  id: 'list-published-posts',
+  description:
+    'List posts that already exist at Zernio, filtered by status: published, scheduled, draft or ' +
+    'failed. Call this before any delete or edit request — never guess a post id, because deleting ' +
+    'the wrong post is unrecoverable and breaks a live link.',
+  inputSchema: z.object({
+    status: z.enum(['published', 'scheduled', 'draft', 'failed', '']).optional(),
+    limit: z.number().int().min(1).max(50).optional(),
+    zernioAccount: z.string().optional(),
+  }),
+  execute: async (input) => {
+    const result = await listPosts(input.status ?? '', input.limit ?? 20, input.zernioAccount);
+    return { summary: result.text, isError: result.isError };
+  },
+});
+
+export const removePost = createTool({
+  id: 'remove-post',
+  description:
+    'Take a post down at Zernio. Prefer action "unpublish": it removes the post from the platform ' +
+    'while keeping the record, and is reversible. Use action "delete" only when the user explicitly ' +
+    'wants it erased, because it breaks the public link permanently and cannot be undone. Always call ' +
+    'list-published-posts first and show the user exactly which post you found. Deleting also does ' +
+    'not erase platform caches, screenshots, analytics or search indexes.',
+  inputSchema: z.object({
+    postId: z.string().describe('The exact post id from list-published-posts'),
+    action: z.enum(['unpublish', 'delete']),
+    confirmedByUser: z.boolean().describe('Must be true. Set only after the user says yes.'),
+    zernioAccount: z.string().optional(),
+  }),
+  execute: async (input) => {
+    if (input.confirmedByUser !== true) {
+      return {
+        removed: false,
+        reason:
+          'The user has not approved this. Show them which post you found with ' +
+          'list-published-posts and ask before removing anything.',
+      };
+    }
+    if (input.action === 'delete') {
+      const result = await deletePost(input.postId, input.zernioAccount);
+      return { removed: !result.isError, action: 'delete', summary: result.text };
+    }
+    const result = await unpublishPost(input.postId, input.zernioAccount);
+    return { removed: !result.isError, action: 'unpublish', summary: result.text };
   },
 });
 
@@ -414,6 +471,8 @@ export const publishingTools = {
   listCredentials,
   revokeStoredCredential,
   listSocialAccounts,
+  listPublishedPosts,
+  removePost,
   recallStory,
   prepareMedia,
   publishMedia,

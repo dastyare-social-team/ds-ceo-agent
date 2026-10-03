@@ -263,6 +263,60 @@ export async function callDiscoveredTool(
 }
 
 /**
+ * Lists posts by status: draft, scheduled, published or failed.
+ *
+ * Without this the agent cannot answer "what is already out there?", which is the
+ * first question in any "delete that post" request and the only way to avoid
+ * deleting the wrong one by guessing at an id.
+ */
+export async function listPosts(
+  status: 'draft' | 'scheduled' | 'published' | 'failed' | '' = '',
+  limit = 20,
+  account: ZernioAccount = 'default',
+): Promise<{ text: string; isError: boolean }> {
+  return rpc('posts_list', { status, limit }, account);
+}
+
+/**
+ * Deletes a post permanently.
+ *
+ * Guarded in the same way publishing is, and with the same reasoning. Zernio also
+ * exposes `unpublish`, which keeps the post record but takes it off the platform —
+ * prefer it when the goal is to stop something being seen rather than to erase
+ * evidence that it existed.
+ */
+export async function deletePost(
+  postId: string,
+  account: ZernioAccount = 'default',
+): Promise<{ text: string; isError: boolean }> {
+  if (isTestRun()) {
+    return {
+      text: 'Delete blocked: this process is a test run. The Zernio credential is a real one.',
+      isError: true,
+    };
+  }
+  return rpc('posts_delete', { post_id: postId }, account);
+}
+
+/** Takes a post down without erasing its record. */
+export async function unpublishPost(
+  postId: string,
+  account: ZernioAccount = 'default',
+): Promise<{ text: string; isError: boolean }> {
+  if (isTestRun()) {
+    return {
+      text: 'Unpublish blocked: this process is a test run. The Zernio credential is a real one.',
+      isError: true,
+    };
+  }
+  return rpc(
+    'posts_update',
+    { post_id: postId, action: 'unpublish' },
+    account,
+  );
+}
+
+/**
  * Zernio HEAD-checks a media URL and reports per-platform size and duration
  * limits.
  *

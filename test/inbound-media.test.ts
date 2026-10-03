@@ -7,6 +7,7 @@ import {
   withMediaSummary,
   type InboundMedia,
 } from '../src/mastra/media/inbound.ts';
+import { removePost } from '../src/mastra/tools/publishing.ts';
 
 // --- detection --------------------------------------------------------------
 
@@ -128,4 +129,26 @@ test('a photo sent with a video keeps its photo', () => {
   // Only the published kind is dropped. The cover image is still useful context
   // and the agent can read it, so discarding it would lose information.
   assert.deepEqual(handed.attachments.map((a) => a.type), ['image']);
+});
+// --- removing what is already published -------------------------------------
+
+test('remove-post refuses without an explicit confirmation', async () => {
+  const result = (await removePost.execute!(
+    { postId: 'abc', action: 'delete', confirmedByUser: false },
+    {},
+  )) as { removed: boolean; reason: string };
+
+  // Deleting a published post breaks a live link. The gate is the same one
+  // publishing uses: no confirmation, no action.
+  assert.equal(result.removed, false);
+  assert.match(result.reason, /has not approved/i);
+});
+
+test('a confirmed unpublish is preferred over delete in the guidance', () => {
+  const description = removePost.description;
+  assert.match(description, /unpublish/i);
+  assert.match(description, /prefer/i);
+  // The irreversible option has to be described as irreversible, or the agent
+  // will pick it whenever the goal is merely "take this down".
+  assert.match(description, /cannot be undone|permanently/i);
 });

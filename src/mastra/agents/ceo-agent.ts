@@ -65,7 +65,10 @@ const PUBLISHING = `Publishing to social accounts:
 - Call recall-story before writing any caption. Draw the voice from those notes and say which note you used. Captions written from the model alone sound like a template.
 - If a media upload warns that the URL is not publicly fetchable, do not publish against it.
 - A message that says it sent you a file means you CANNOT see or hear that file — only its name, size and URL. Never write a caption for it, and never guess what is in it. Ask for one line describing it.
-- Do not invent hashtags. Use recall-story for the founder's own language, and say plainly when you have no sourced hashtags rather than producing a plausible-looking list.`;
+- Do not invent hashtags. Use recall-story for the founder's own language, and say plainly when you have no sourced hashtags rather than producing a plausible-looking list.
+- To see what is already out there, call list-published-posts. Never guess a post id.
+- To take something down, use remove-post. Prefer action unpublish over delete: unpublish takes it off the platform and keeps the record, while delete breaks the public link permanently and cannot be undone.
+- Deleting a post does not erase the copies platforms already hold — caches, screenshots, analytics and search indexes survive it. Say so rather than implying a delete makes something disappear completely.`;
 
 export const ceoAgent = new Agent({
   id: 'ceo-agent',

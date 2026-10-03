@@ -65,6 +65,8 @@ const PUBLISHING = `Publishing to social accounts:
 - Call recall-story before writing any caption. Draw the voice from those notes and say which note you used. Captions written from the model alone sound like a template.
 - If a media upload warns that the URL is not publicly fetchable, do not publish against it.
 - A video arrives with its transcript attached. Write the caption from that transcript — that is what the video says. Do not ask the user to describe a video you have already been given the words for.
+- If a transcript is missing, you have a transcribe-video tool: call it with the video's public URL rather than telling the user you have no transcription capability. You do have one.
+- If the tool reports a failure, relay the reason. Do not silently fall back to asking the user to describe the video.
 - An image arrives with nothing but a file name. You cannot see it, so ask for one line describing it rather than inventing a caption.
 - Do not invent hashtags. Use recall-story for the founder's own language, and say plainly when you have no sourced hashtags rather than producing a plausible-looking list.
 - To see what is already out there, call list-published-posts. Never guess a post id.

@@ -179,18 +179,21 @@ export function createGuardedHandler(
           /**
            * Video is transcribed here rather than asked about, because "describe
            * the video" is a question the user should never have to answer twice.
-           * Speechmatics bills by the audio minute, so this is gated on a key
-           * being stored rather than always attempted: with no key the model is
-           * told plainly that it cannot see the file and asks, which is the honest
-           * fallback and costs nothing.
            *
-           * A transcription failure never fails the message. The file is already
-           * uploaded and publishable, so the user keeps that even if the caption
-           * has to wait.
+           * A failure is reported to the user rather than swallowed. It used to
+           * degrade silently into "you cannot see this file, ask the user", which
+           * made an API failure indistinguishable from a design decision: the bot
+           * said it had no transcription tool when the truth was that the tool
+           * ran and the call failed. Saying which it was is the difference between
+           * a fixable problem and a dead end.
            */
           let transcript: string | null = null;
           if (media.kind === 'video') {
-            transcript = await transcribeVideoFor(message as never, media, ctx);
+            const attempt = await transcribeVideoFor(message as never, media, ctx);
+            transcript = attempt.transcript;
+            if (!transcript && attempt.reason) {
+              await thread.post(`**transcription failed — ** ${attempt.reason}`);
+            }
           }
 
           await defaultHandler(
@@ -397,19 +400,28 @@ async function publishApprovedFor(draftId: string): Promise<string> {
 }
 
 /**
- * Transcribes an uploaded video, or explains why it could not.
+ * Transcribes an uploaded video.
  *
- * Returns the transcript, or null. Never throws: a video that cannot be
- * transcribed is still publishable, so failing the whole message over a caption
- * would be a worse outcome than asking the user what it shows.
+ * Returns the transcript, or null plus a reason the user can act on. Never throws:
+ * a video that cannot be transcribed is still publishable, so failing the whole
+ * message over a caption would be a worse outcome than telling the user what went
+ * wrong.
  */
 async function transcribeVideoFor(
   message: unknown,
   media: { kind: string; fileName: string | null },
   ctx: unknown,
-): Promise<string | null> {
-  const logger = (ctx as { mastra?: { getLogger?: () => { debug?: (m: string) => void; warn?: (m: string) => void } } })
-    ?.mastra?.getLogger?.();
+): Promise<{ transcript: string | null; reason?: string }> {
+  const logger = (
+    ctx as {
+      mastra?: {
+        getLogger?: () => {
+          debug?: (m: string) => void;
+          warn?: (m: string) => void;
+        };
+      };
+    }
+  )?.mastra?.getLogger?.();
 
   try {
     const { audioBytesOf } = await import('./media/inbound.ts');
@@ -421,16 +433,19 @@ async function transcribeVideoFor(
     });
 
     if (outcome.ok && outcome.transcript) {
-      logger?.debug?.(`[media] transcribed ${outcome.transcript.durationSeconds ?? '?'}s of video`);
-      return outcome.transcript.text;
+      logger?.debug?.(
+        `[media] transcribed ${outcome.transcript.durationSeconds ?? '?'}s of video`,
+      );
+      return { transcript: outcome.transcript.text };
     }
 
-    // Either still processing or refused. Both are reported, not swallowed: a
-    // silent failure here looks exactly like the model ignoring the video.
+    // Either still processing or refused. Reported rather than swallowed, because
+    // silence here is indistinguishable from the model ignoring the video.
     logger?.warn?.(`[media] transcript unavailable: ${outcome.message}`);
-    return null;
+    return { transcript: null, reason: outcome.message };
   } catch (error) {
-    logger?.warn?.(`[media] transcription failed: ${String(error)}`);
-    return null;
+    const reason = String((error as Error)?.message ?? error);
+    logger?.warn?.(`[media] transcription failed: ${reason}`);
+    return { transcript: null, reason };
   }
 }

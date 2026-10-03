@@ -74,6 +74,12 @@ export async function submitJob(
   options: { kind?: string; fileName?: string | null; account?: string; language?: string } = {},
 ): Promise<string> {
   if (bytes.byteLength === 0) throw new Error('Nothing to transcribe: the file was empty');
+
+  // Speechmatics bills per audio minute against a real account, so a test run
+  // must never submit a job. The same reasoning as the Zernio publish guard.
+  if (process.env.NODE_TEST_CONTEXT) {
+    throw new Error('Transcription blocked: this process is a test run.');
+  }
   if (bytes.byteLength > MAX_BYTES) {
     throw new Error(
       `File is ${(bytes.byteLength / 1024 / 1024).toFixed(0)}MB; the transcription limit is 100MB`,

@@ -19,6 +19,7 @@ import {
   unpublishPost,
 } from '../zernio/mcp.ts';
 import { uploadMedia, verifyPublicUrl, type MediaKind } from '../media/storage.ts';
+import { transcribeMedia, extractText } from '../transcribe/speechmatics.ts';
 import {
   captionWarnings,
   describeTargets,
@@ -263,6 +264,64 @@ export const removePost = createTool({
   },
 });
 
+// --- transcription ----------------------------------------------------------
+
+/**
+ * Transcribe a video by its public URL.
+ *
+ * The guard already transcribes a video as it arrives, so this exists for the two
+ * cases that path cannot cover: a transcript that was still processing when the
+ * message timed out, and a video the user is talking about rather than sending.
+ * It is also what makes the capability real to the model — an agent told "you
+ * cannot see videos" with no tool to change that will keep saying so, which is
+ * exactly what happened.
+ */
+export const transcribeVideo = createTool({
+  id: 'transcribe-video',
+  description:
+    'Transcribe a video from its public HTTPS URL using Speechmatics, returning the spoken text. ' +
+    'Call this when a video transcript is missing or a previous attempt was still processing. ' +
+    'Use the transcript to write the caption — do not invent what the video says, and do not ask ' +
+    'the user to describe a video you can transcribe yourself.',
+  inputSchema: z.object({
+    url: z.string().describe('Public HTTPS URL of the video, as reported after upload'),
+    account: z.string().optional().describe('Speechmatics credential slot, default "default"'),
+    language: z.string().optional().describe('ISO language code, e.g. "en". Omit to auto-detect.'),
+  }),
+  execute: async (input) => {
+    // The URL is the public object path, so this fetches through Supabase rather
+    // than the S3 endpoint, which answers 403 unsigned.
+    const response = await fetch(input.url, { signal: AbortSignal.timeout(120_000) });
+    if (!response.ok) {
+      return {
+        ok: false,
+        reason: `Could not fetch the video (HTTP ${response.status}).`,
+      };
+    }
+    const bytes = new Uint8Array(await response.arrayBuffer());
+
+    try {
+      const outcome = await transcribeMedia(bytes, {
+        kind: 'video',
+        fileName: input.url.split('/').pop() ?? null,
+        account: input.account,
+        language: input.language,
+      });
+      if (outcome.ok && outcome.transcript) {
+        return {
+          ok: true,
+          transcript: outcome.transcript.text,
+          language: outcome.transcript.language,
+          durationSeconds: outcome.transcript.durationSeconds,
+        };
+      }
+      return { ok: false, pending: outcome.pending, reason: outcome.message };
+    } catch (error) {
+      return { ok: false, reason: String((error as Error)?.message ?? error) };
+    }
+  },
+});
+
 // --- the confirm gate -------------------------------------------------------
 
 /**
@@ -476,6 +535,7 @@ export const publishingTools = {
   recallStory,
   prepareMedia,
   publishMedia,
+  transcribeVideo,
   proposeContent,
   confirmDraft,
   publishApproved,

@@ -1,4 +1,5 @@
 import { PutObjectCommand, S3Client } from '@aws-sdk/client-s3';
+import { env } from '../env.ts';
 import { getCredentialSecret } from '../db/client.ts';
 
 /**
@@ -21,17 +22,62 @@ import { getCredentialSecret } from '../db/client.ts';
  *     be refused as well as expiring before a scheduled post fires.
  *   - Media is fetched later, at publish time. A short-lived signed URL would
  *     break every scheduled post, so this returns unsigned public URLs.
+ *
+ * Configuration comes from the environment, not from the encrypted credential
+ * store: these are long-lived service credentials for one bucket, unlike the
+ * per-workspace Zernio keys that get reissued and so belong in the database. The
+ * store is still consulted as a fallback so a key can be rotated without a
+ * redeploy if that ever changes.
  */
-
-const BUCKET = 'ds-ceo-agent';
-/** Supabase's public object path. The S3 endpoint itself is auth-only (403 unsigned). */
-const PUBLIC_BASE = `https://owxotllfofaloaocalyp.storage.supabase.co/storage/v1/object/public/${BUCKET}`;
-const REGION = 'ap-northeast-2';
-const S3_ENDPOINT = 'https://owxotllfofaloaocalyp.storage.supabase.co/storage/v1/s3';
 
 /** Telegram's own bot-API download ceiling for files. */
 const MAX_BYTES = 20 * 1024 * 1024;
 
+interface StorageConfig {
+  endpoint: string;
+  region: string;
+  bucket: string;
+  publicBase: string;
+  accessKeyId: string;
+  secretAccessKey: string;
+}
+
+/**
+ * Resolves storage configuration, preferring the environment.
+ *
+ * A clear error listing every variable that is missing beats a client throwing
+ * `InvalidConfigurationError` three calls deeper, because this is configured in
+ * two places and the difference is otherwise invisible.
+ */
+async function storageConfig(): Promise<StorageConfig> {
+  const accessKeyId = env('S3_ACCESS_KEY_ID') ?? (await getCredentialSecret('supabase-s3', 'default-access-key'));
+  const secretAccessKey =
+    env('S3_SECRET_ACCESS_KEY') ?? (await getCredentialSecret('supabase-s3', 'default-secret'));
+
+  const missing = [
+    !env('S3_ENDPOINT') && !accessKeyId ? 'S3_ENDPOINT' : null,
+    !env('S3_BUCKET') ? 'S3_BUCKET' : null,
+    !env('S3_PUBLIC_BASE_URL') ? 'S3_PUBLIC_BASE_URL' : null,
+    !accessKeyId ? 'S3_ACCESS_KEY_ID' : null,
+    !secretAccessKey ? 'S3_SECRET_ACCESS_KEY' : null,
+  ].filter(Boolean) as string[];
+
+  if (missing.length) {
+    throw new Error(`Media storage is not configured. Missing: ${missing.join(', ')}`);
+  }
+
+  const bucket = env('S3_BUCKET')!;
+  return {
+    endpoint: env('S3_ENDPOINT')!,
+    region: env('S3_REGION') ?? 'us-east-1',
+    bucket,
+    // Derived from the endpoint when unset, since most S3 providers expose public
+    // objects at the same host with no auth on GET.
+    publicBase: env('S3_PUBLIC_BASE_URL') ?? `${env('S3_ENDPOINT')!.replace(/\/s3$/, '')}/${bucket}`,
+    accessKeyId: accessKeyId!,
+    secretAccessKey: secretAccessKey!,
+  };
+}
 /**
  * Extension and content type must agree, because Zernio reads the extension and
  * rejects a contradiction with 400. Telegram's file_name is unreliable for this
@@ -75,14 +121,7 @@ export async function uploadMedia(
     );
   }
 
-  const accessKeyId = await getCredentialSecret('supabase-s3', 'default-access-key');
-  const secretAccessKey = await getCredentialSecret('supabase-s3', 'default-secret');
-  if (!accessKeyId || !secretAccessKey) {
-    throw new Error(
-      'Supabase S3 credentials are not stored. Add them first, then retry.',
-    );
-  }
-
+  const config = await storageConfig();
   const { extension, contentType } = MEDIA_TYPES[kind];
   // A date prefix keeps the bucket navigable and stops keys colliding between
   // uploads in the same second.
@@ -90,15 +129,18 @@ export async function uploadMedia(
   const key = `${prefix}/${crypto.randomUUID()}.${extension}`;
 
   const client = new S3Client({
-    region: REGION,
-    endpoint: S3_ENDPOINT,
-    credentials: { accessKeyId, secretAccessKey },
+    region: config.region,
+    endpoint: config.endpoint,
+    credentials: {
+      accessKeyId: config.accessKeyId,
+      secretAccessKey: config.secretAccessKey,
+    },
     forcePathStyle: true,
   });
 
   await client.send(
     new PutObjectCommand({
-      Bucket: BUCKET,
+      Bucket: config.bucket,
       Key: key,
       Body: bytes,
       ContentType: contentType,
@@ -108,7 +150,7 @@ export async function uploadMedia(
     }),
   );
 
-  return { url: `${PUBLIC_BASE}/${key}`, key, bytes: bytes.byteLength, contentType };
+  return { url: `${config.publicBase}/${key}`, key, bytes: bytes.byteLength, contentType };
 }
 
 /** Confirms the public URL really is fetchable, before a draft depends on it. */

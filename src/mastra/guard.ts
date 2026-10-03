@@ -174,10 +174,35 @@ export function createGuardedHandler(
           await thread.post(
             `**uploaded — ** ${media.kind}, ${(media.bytes / 1024 / 1024).toFixed(1)}MB`,
           );
-          ctx?.mastra?.getLogger?.().debug?.(
-            `[media] uploaded ${media.kind} to ${media.url}`,
+          ctx?.mastra?.getLogger?.().debug?.(`[media] uploaded ${media.kind} to ${media.url}`);
+
+          /**
+           * Video is transcribed here rather than asked about, because "describe
+           * the video" is a question the user should never have to answer twice.
+           * Speechmatics bills by the audio minute, so this is gated on a key
+           * being stored rather than always attempted: with no key the model is
+           * told plainly that it cannot see the file and asks, which is the honest
+           * fallback and costs nothing.
+           *
+           * A transcription failure never fails the message. The file is already
+           * uploaded and publishable, so the user keeps that even if the caption
+           * has to wait.
+           */
+          let transcript: string | null = null;
+          if (media.kind === 'video') {
+            transcript = await transcribeVideoFor(message as never, media, ctx);
+          }
+
+          await defaultHandler(
+            thread,
+            withMediaSummary(
+              message,
+              transcript
+                ? `${describeInboundMedia(media)}\n\nTranscript of what the video says:\n"""\n${transcript}\n"""`
+                : describeInboundMedia(media),
+              media.kind,
+            ) as never,
           );
-          await defaultHandler(thread, withMediaSummary(message, describeInboundMedia(media), media.kind) as never);
         } catch (error) {
           const detail = errorDetail(error);
           ctx?.mastra?.getLogger?.().error(`[media] upload failed: ${detail}`);
@@ -369,4 +394,43 @@ async function publishApprovedFor(draftId: string): Promise<string> {
     .map((r) => `${r.platform}: ${r.text}`)
     .join('\n');
   return `Not published.\n${failures || 'No detail was returned by Zernio.'}`;
+}
+
+/**
+ * Transcribes an uploaded video, or explains why it could not.
+ *
+ * Returns the transcript, or null. Never throws: a video that cannot be
+ * transcribed is still publishable, so failing the whole message over a caption
+ * would be a worse outcome than asking the user what it shows.
+ */
+async function transcribeVideoFor(
+  message: unknown,
+  media: { kind: string; fileName: string | null },
+  ctx: unknown,
+): Promise<string | null> {
+  const logger = (ctx as { mastra?: { getLogger?: () => { debug?: (m: string) => void; warn?: (m: string) => void } } })
+    ?.mastra?.getLogger?.();
+
+  try {
+    const { audioBytesOf } = await import('./media/inbound.ts');
+    const { transcribeMedia } = await import('./transcribe/speechmatics.ts');
+
+    const outcome = await transcribeMedia(await audioBytesOf(message), {
+      kind: media.kind,
+      fileName: media.fileName,
+    });
+
+    if (outcome.ok && outcome.transcript) {
+      logger?.debug?.(`[media] transcribed ${outcome.transcript.durationSeconds ?? '?'}s of video`);
+      return outcome.transcript.text;
+    }
+
+    // Either still processing or refused. Both are reported, not swallowed: a
+    // silent failure here looks exactly like the model ignoring the video.
+    logger?.warn?.(`[media] transcript unavailable: ${outcome.message}`);
+    return null;
+  } catch (error) {
+    logger?.warn?.(`[media] transcription failed: ${String(error)}`);
+    return null;
+  }
 }

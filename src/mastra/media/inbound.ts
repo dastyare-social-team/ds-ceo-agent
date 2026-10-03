@@ -176,9 +176,9 @@ export function describeInboundMedia(media: InboundMedia): string {
     `It is uploaded and reachable at: ${media.url}`,
     media.publiclyFetchable ? '' : 'That URL is NOT publicly fetchable, so do not publish against it.',
     '',
-    'You cannot see or hear the contents of this file — you have only its name and size.',
-    'Do NOT write a caption, invent a topic for it, or state platform engagement figures.',
-    'Ask the user in one line what the file shows, then use that to draft.',
+    'You cannot see or hear the contents of this file — you have only its name, size and, for video, a transcript.',
+    'For an image you have nothing but the name, so ask the user in one line what it shows. Do not invent a topic for it.',
+    'Never state platform engagement figures, algorithm behaviour or posting penalties as fact.',
     'Before proposing any platform, call list-social-accounts to see what is actually connected.',
     'Only those connected accounts are options — never suggest a platform the user has not connected.',
   ]
@@ -210,4 +210,12 @@ export function withMediaSummary(
       ? attachments.filter((a) => kindForAttachment(a) !== publishedKind)
       : attachments,
   };
+}
+
+/** The raw attachment bytes, for anything that must post-process the file. */
+export async function audioBytesOf(message: unknown): Promise<Uint8Array> {
+  const attachments = ((message as { attachments?: unknown })?.attachments ?? []) as InboundAttachment[];
+  const attachment = attachments.find((a) => kindForAttachment(a) !== undefined && a?.fetchData);
+  if (!attachment?.fetchData) throw new Error('No media on the message');
+  return toBytes(await attachment.fetchData());
 }

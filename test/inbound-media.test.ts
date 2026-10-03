@@ -66,7 +66,16 @@ test('the description tells the model it cannot see the file', () => {
   // engagement figures about a video it had never watched.
   const text = describeInboundMedia(media);
   assert.match(text, /cannot see or hear/i);
-  assert.match(text, /Do NOT write a caption/i);
+  assert.match(text, /only its name, size/i);
+});
+
+test('the description does not tell the model to ask about a video it has a transcript for', () => {
+  // The ask-the-user line applies to images. A video now arrives with its
+  // transcript, so telling the model to ask for a description would make it
+  // ignore the words it was given.
+  const text = describeInboundMedia(media);
+  assert.match(text, /For an image you have nothing but the name/);
+  assert.match(text, /transcript/i);
 });
 
 test('the description supplies the public URL Zernio needs', () => {

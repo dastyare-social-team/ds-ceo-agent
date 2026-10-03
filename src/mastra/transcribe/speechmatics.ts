@@ -18,7 +18,8 @@ import { getCredentialSecret } from '../db/client.ts';
  * the encrypted store so several workspaces can be switched between by name.
  */
 
-const BASE = process.env.SPEECHMATICS_API_URL ?? 'https://api.speechmatics.com/v2';
+const BASE =
+  process.env.SPEECHMATICS_API_URL ?? 'https://eu1.asr.api.speechmatics.com/v2';
 /**
  * Speechmatics is asynchronous, so a job may outlive one webhook invocation. The
  * budget is bounded by how long the platform will hold the function: long enough
@@ -88,19 +89,54 @@ export async function submitJob(
 
   const key = await apiKey(options.account);
   const url = new URL(`${BASE}/jobs`);
-  // Diarisation is off by default: captions are single-voice, and paying for
-  // speaker labels nobody asked for spends credits for nothing.
   if (options.language) url.searchParams.set('language', options.language);
+
+  /**
+   * multipart/form-data, not the file as a raw body.
+   *
+   * The published curl examples post the audio directly, and doing that returns
+   * `{"code": 422, "message": "Content-Type must be multipart/form-data"}`. The
+   * error is only visible against the live API, which is why the endpoint is now
+   * verified rather than assumed.
+   */
+  const form = new FormData();
+  form.set(
+    'data_file',
+    new Blob([new Uint8Array(bytes)], { type: contentTypeFor(options.kind ?? 'video', options.fileName) }),
+    options.fileName ?? `audio.${(options.kind ?? 'video') === 'audio' ? 'wav' : 'mp4'}`,
+  );
+  /**
+   * The config object is schema-validated by the API, and the shape is not
+   * guessable: `type`, then `transcription_config` (not `transcription`), then
+   * `language` inside that. Each mistake is a distinct 400, and the documented
+   * curl examples do not show the config at all, so it was established against
+   * the live API.
+   *
+   *   type                   required, "transcription"
+   *   transcription_config   required object
+   *     language             required, ISO code — no auto-detection
+   *     model                optional: standard (default) | enhanced | melia-1
+   *
+   * `model` is left unset so the default applies rather than naming a value that
+   * could change meaning. Language defaults to English and is overridable per
+   * call, because Persian content needs 'fa'.
+   */
+  form.set(
+    'config',
+    JSON.stringify({
+      type: 'transcription',
+      transcription_config: {
+        language: options.language ?? 'en',
+      },
+    }),
+  );
 
   let response: Response;
   try {
     response = await fetch(url, {
       method: 'POST',
-      headers: {
-        Authorization: `Bearer ${key}`,
-        'Content-Type': contentTypeFor(options.kind ?? 'video', options.fileName),
-      },
-      body: bytes as unknown as BodyInit,
+      headers: { Authorization: `Bearer ${key}` },
+      body: form,
       signal: AbortSignal.timeout(120_000),
     });
   } catch (cause) {
@@ -151,10 +187,18 @@ interface TranscriptResponse {
   results?: {
     type?: string;
     alternatives?: { content?: string; confidence?: number }[];
+    end_time?: number;
+    start_time?: number;
   }[];
   metadata?: {
-    transcription_config?: { language?: string; diarization?: string };
-    duration?: number;
+    transcription_config?: { language?: string };
+    /**
+     * There is no duration in the response. Verified against a live job: metadata
+     * carries created_at, language_pack_info, orchestrator_version,
+     * transcription_config and type, and nothing else. Duration is derived from the
+     * last word's end_time instead.
+     */
+    created_at?: string;
   };
 }
 
@@ -200,10 +244,13 @@ export async function fetchTranscript(
     throw new Error(`Could not read transcript: HTTP ${response.status}`);
   }
   const payload = (await response.json()) as TranscriptResponse;
+  // The last timed result ends at the end of the audio.
+  const last = [...(payload.results ?? [])].reverse().find((r) => typeof r.end_time === 'number');
+
   return {
     text: extractText(payload),
     language: payload.metadata?.transcription_config?.language,
-    durationSeconds: payload.metadata?.duration,
+    durationSeconds: last?.end_time,
     jobId,
   };
 }

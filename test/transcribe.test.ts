@@ -66,3 +66,23 @@ test('multi-word alternatives are not mangled', () => {
   });
   assert.equal(text, 'Hester Prynne');
 });
+
+test('duration is derived from the last timed word, since the API sends none', () => {
+  // Verified against a live job: metadata has no duration field, so a naive read
+  // yields undefined and the log line reads "transcribed undefineds".
+  const results = [
+    { type: 'word', alternatives: [{ content: 'Yet' }], start_time: 0, end_time: 0.24 },
+    { type: 'word', alternatives: [{ content: 'thoughts' }], start_time: 0.3, end_time: 0.91 },
+  ];
+  const last = [...results].reverse().find((r) => typeof r.end_time === 'number');
+  assert.equal(last?.end_time, 0.91);
+});
+
+test('results with no timing do not break the duration read', () => {
+  const results = [
+    { type: 'word', alternatives: [{ content: 'a' }] },
+    { type: 'word', alternatives: [{ content: 'b' }], end_time: 1.5 },
+  ];
+  const last = [...results].reverse().find((r) => typeof r.end_time === 'number');
+  assert.equal(last?.end_time, 1.5);
+});

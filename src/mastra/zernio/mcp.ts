@@ -157,6 +157,23 @@ export interface PublishInput {
 }
 
 /**
+ * Refuses to publish while running under `node --test`.
+ *
+ * The credential store is shared with production, so a test that reaches Zernio
+ * posts to accounts real people follow. That is not hypothetical: the
+ * confirm-gate suite calls the publish path to prove the gate opens, and it
+ * published to a real account before this check existed. Zernio's duplicate
+ * guard caught that one, but relying on Zernio to save a test is not a plan.
+ *
+ * `NODE_TEST_CONTEXT` is set by the Node test runner in each child process and is
+ * absent otherwise, which makes it a more trustworthy signal than NODE_ENV —
+ * nothing sets NODE_ENV in this repo, so it was simply always undefined.
+ */
+function isTestRun(): boolean {
+  return Boolean(process.env.NODE_TEST_CONTEXT);
+}
+
+/**
  * Creates a real post at Zernio — published now, or scheduled.
  *
  * There is deliberately no "create draft here, publish it later" path. Zernio's
@@ -171,6 +188,12 @@ export async function publishPost(
   input: PublishInput,
   account: ZernioAccount = 'default',
 ): Promise<{ text: string; isError: boolean }> {
+  if (isTestRun()) {
+    return {
+      text: 'Publish blocked: this process is a test run. The Zernio credential is a real one.',
+      isError: true,
+    };
+  }
   return rpc(
     'posts_create',
     {
@@ -192,6 +215,12 @@ export async function crossPost(
   input: { content: string; accountIds?: string[]; mediaUrls?: string },
   account: ZernioAccount = 'default',
 ): Promise<{ text: string; isError: boolean }> {
+  if (isTestRun()) {
+    return {
+      text: 'Publish blocked: this process is a test run. The Zernio credential is a real one.',
+      isError: true,
+    };
+  }
   return rpc(
     'posts_cross_post',
     {

@@ -132,7 +132,10 @@ test('a confirmed draft reaches the publish stage for every proposed platform', 
   assert.deepEqual(result.results.map((r) => r.platform).sort(), ['linkedin', 'telegram']);
   for (const entry of result.results) {
     assert.equal(entry.isError, true);
-    assert.match(entry.text, /No Zernio API key/i);
+    // The publish path must be blocked in tests, since the stored Zernio
+    // credential is a real one. Getting this wrong once already attempted a
+    // publish to a live account.
+    assert.match(entry.text, /Publish blocked/i);
   }
 
   const after = (await db

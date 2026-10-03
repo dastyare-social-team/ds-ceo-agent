@@ -3,6 +3,12 @@ import { isAllowedUser, REJECTION_NOTICE } from './access.ts';
 import { chatHistory, parseChatCommand, recallSession, startNewChat } from './commands.ts';
 import type { SentMessageLike } from './processors/progress-types.ts';
 import { isVoiceMessage, transcribeVoice, withTranscript } from './voice.ts';
+import {
+  describeInboundMedia,
+  isMediaMessage,
+  publishInboundMedia,
+  withMediaSummary,
+} from './media/inbound.ts';
 
 /**
  * Plain text of an incoming message.
@@ -138,6 +144,36 @@ export function createGuardedHandler(
           if (logger) logger.error(line);
           else console.error(line);
           await thread.post(`Could not run /${command}. Try again in a moment.`);
+        }
+        return;
+      }
+
+      /**
+       * Video, image and document attachments are uploaded to storage and handed
+       * to the model as a URL plus an explicit statement that it cannot see them.
+       *
+       * Without this a video arrived as an "[Attached file: IMG_2515.MP4]"
+       * placeholder and a text-only model responded by inventing platforms and
+       * engagement statistics about them. A model cannot decline what it believes
+       * it can see, so the fix is to tell it plainly that it cannot.
+       *
+       * Audio is deliberately not handled here: voice is transcribed, and that path
+       * is below.
+       */
+      if (isMediaMessage(message as never)) {
+        try {
+          const media = await publishInboundMedia(message as never);
+          await thread.post(
+            `**uploaded — ** ${media.kind}, ${(media.bytes / 1024 / 1024).toFixed(1)}MB`,
+          );
+          ctx?.mastra?.getLogger?.().debug?.(
+            `[media] uploaded ${media.kind} to ${media.url}`,
+          );
+          await defaultHandler(thread, withMediaSummary(message, describeInboundMedia(media), media.kind) as never);
+        } catch (error) {
+          const detail = errorDetail(error);
+          ctx?.mastra?.getLogger?.().error(`[media] upload failed: ${detail}`);
+          await thread.post(`Could not upload that file. ${detail}`);
         }
         return;
       }
